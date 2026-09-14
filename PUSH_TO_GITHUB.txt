@@ -1,0 +1,56 @@
+Pushing PeerParley v2 to GitHub
+===============================
+
+This folder is already a git repository with one commit, and the remote is
+already set to:
+
+    https://github.com/chrisscherpereel-cyber/PeerParley_AI.git
+
+That repo was verified empty, so this push creates its history rather than
+overwriting anything.
+
+From a terminal in THIS folder, run:
+
+    git push -u origin main
+
+That is the whole thing. Git will prompt for your GitHub credentials; use a
+personal access token as the password (GitHub stopped accepting account
+passwords over HTTPS). Create one at:
+
+    https://github.com/settings/tokens
+    -> "Generate new token (classic)" -> tick the "repo" scope
+
+If you'd rather not deal with tokens, install the GitHub CLI and run
+`gh auth login` once, then the push above will just work.
+
+
+If git says "remote origin already exists"
+------------------------------------------
+Then you're in a different copy of the folder. Point it at the right place:
+
+    git remote set-url origin https://github.com/chrisscherpereel-cyber/PeerParley_AI.git
+    git push -u origin main
+
+
+If git says "src refspec main does not match any"
+-------------------------------------------------
+Your git named the branch "master". Rename it and push:
+
+    git branch -M main
+    git push -u origin main
+
+
+Before you deploy
+-----------------
+Nothing secret is in this repo, which also means nothing is configured. Set up
+secrets from the template:
+
+    .streamlit/secrets.toml.example   ->   .streamlit/secrets.toml   (never commit)
+
+On Streamlit Community Cloud there is no file: paste that content into the
+app's Settings -> Secrets box instead. See DEPLOYMENT.md.
+
+Verify the build any time with:
+
+    python -m pytest tests/ -q     (40 tests, no API key needed)
+    python qa_regression.py        (41 end-to-end checks)

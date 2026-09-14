@@ -1,0 +1,30 @@
+streamlit>=1.36
+pandas>=2.2
+numpy>=1.26
+openpyxl>=3.1
+reportlab>=4.1
+cryptography>=42.0
+requests>=2.32
+msal>=1.28
+# Retry/backoff for LLM calls (rate limits, 5xx, timeouts)
+tenacity>=8.2
+# Optional storage backends (install only what you use)
+dropbox>=11.36
+# PDF preview (optional; app degrades gracefully if absent)
+PyMuPDF>=1.24
+# WYSIWYG email editor (app falls back to a plain HTML box if absent)
+streamlit-quill>=0.0.3
+#
+# ---- AI feedback writer (v2) ----------------------------------------------
+# All optional. The app imports and runs without any of them; each provider's
+# SDK is imported lazily, and choosing a provider whose SDK is missing produces
+# a message naming the package rather than a traceback. Install only the one(s)
+# you will use.
+#
+# openai      — OpenAI, xAI, OpenRouter, and local Ollama / LM Studio
+#               (they all speak the same /chat/completions contract)
+# anthropic   — Claude
+# google-genai — Gemini
+openai>=1.40
+anthropic>=0.34
+google-genai>=0.3
