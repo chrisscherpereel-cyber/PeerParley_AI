@@ -192,7 +192,21 @@ def sidebar_settings() -> AISettings:
     ready, why = s.ready()
     if not ready:
         st.info(why)
-    elif s.model == FREE_ROUTER:
+    else:
+        # Cheaper in every sense than learning the key is dead on student forty.
+        if st.button("Test the key", key="ai_test_key",
+                     help="Sends one tiny request to confirm the provider "
+                          "accepts this key and model. Costs a few tokens."):
+            st.session_state[SETTINGS_KEY] = s
+            with st.spinner("Checking…"):
+                ok, problem = fai.test_credentials(s)
+            if ok:
+                st.success(f"{spec.label} accepted the key, and `{s.model}` "
+                           "answered.", icon="✅")
+            else:
+                st.error(problem, icon="🔑")
+
+    if ready and s.model == FREE_ROUTER:
         st.caption(
             "The free router picks a different model per call, so wording "
             "quality varies between runs. Fine for a first draft."
@@ -321,24 +335,47 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         def _progress(i: int, total: int, name: str) -> None:
             bar.progress(i / max(total, 1), text=f"Writing {name} ({i} of {total})…")
 
+        aborted = ""
         try:
             fresh = fai.generate_for_teams(
                 teams, settings, progress=_progress, only_keys=targets,
             )
+        except fai.BatchAborted as exc:
+            # One credential failure, reported once. Whatever finished before
+            # the stop is kept rather than thrown away with the error.
+            fresh = exc.drafts
+            aborted = str(exc)
         except Exception as exc:  # noqa: BLE001
             bar.empty()
             st.error(f"Could not start generation: {exc}")
             return fai.approved_narratives(drafts)
 
         bar.empty()
+        if aborted:
+            st.error(aborted, icon="🔑")
+            st.caption(
+                "Generation stopped at the first rejected request rather than "
+                "repeating it for every remaining student. Fix the key in the "
+                "sidebar, then use **Draft the remaining**."
+            )
+            drafts.update(fresh)
+            st.session_state[STATE_KEY] = drafts
+            return fai.approved_narratives(drafts)
+
         drafts.update(fresh)
         st.session_state[STATE_KEY] = drafts
         stats = fai.batch_stats(fresh)
-        st.success(
-            f"Drafted {stats['total']} · {stats['clean']} clean · "
+        line = (
+            f"{stats['written']} narrative(s) written · {stats['clean']} clean · "
             f"{stats['flagged']} flagged · {stats['thin']} too thin to write · "
             f"{stats['errors']} failed."
         )
+        # Not a success when nothing was written. Saying "Drafted 40" over forty
+        # failures is how an instructor ends up believing the run worked.
+        if stats["written"]:
+            st.success(line)
+        else:
+            st.error(line + "  No narratives were produced — see below.")
 
     if not drafts:
         st.info(
@@ -350,11 +387,30 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
 
     # ---- batch status ----------------------------------------------------
     stats = fai.batch_stats(drafts)
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Drafted", stats["total"])
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Written", stats["written"],
+              help="Drafts that produced usable text. Failures and students with "
+                   "too few comments are counted separately.")
     m2.metric("Approved", stats["approved"])
     m3.metric("Need a read", stats["flagged"])
     m4.metric("Unsupported claims", stats["high"])
+    m5.metric("Failed", stats["errors"],
+              help="Requests that errored. These wrote nothing.")
+
+    # One banner per distinct failure, however many students it hit.
+    for message, names in fai.error_groups(drafts):
+        if len(names) == 1:
+            continue  # a lone failure reads fine on its own row below
+        st.error(
+            f"**{len(names)} students failed with the same error.** {message}",
+            icon="⚠️",
+        )
+        st.caption(
+            "One cause, not " + str(len(names)) + ". Affected: "
+            + ", ".join(names[:6])
+            + (f", and {len(names) - 6} more." if len(names) > 6 else "")
+            + "  Fix it, then use **Draft the remaining**."
+        )
 
     if stats["high"]:
         st.warning(

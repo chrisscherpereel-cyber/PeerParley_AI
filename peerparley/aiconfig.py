@@ -182,19 +182,23 @@ def get_secret(name: str, default: str = "") -> str:
     """
     if not name:
         return default
+    # Every return path is stripped. A key pasted into the Streamlit Cloud
+    # secrets box or exported in a shell profile very often carries a trailing
+    # newline or space, and several providers reject that with a bare 401 —
+    # which sends the instructor hunting for a broken key that is actually fine.
     if st is not None:
         try:
             if name in st.secrets:
-                return str(st.secrets[name])
+                return str(st.secrets[name]).strip()
         except Exception:
             pass
         try:
             node = st.secrets.get("ai", {}) or {}
             if name in node:
-                return str(node[name])
+                return str(node[name]).strip()
         except Exception:
             pass
-    return os.environ.get(name, default)
+    return (os.environ.get(name) or default or "").strip()
 
 
 def configured_providers() -> List[str]:
@@ -267,7 +271,7 @@ class AISettings:
 
     def resolved_api_key(self) -> str:
         if self.api_key:
-            return self.api_key
+            return self.api_key.strip()
         return get_secret(get_provider(self.provider).env_var)
 
     def spec(self) -> Provider:
@@ -283,4 +287,23 @@ class AISettings:
                 f"No API key for {spec.label}. Paste one in the sidebar, or set "
                 f"{spec.env_var} in the app's secrets. Keys: {spec.console_url}"
             )
+        # Catch a key pasted under the wrong provider before a batch of forty
+        # requests discovers it one 401 at a time.
+        mismatch = self.key_mismatch()
+        if mismatch:
+            other = get_provider(mismatch)
+            return False, (
+                f"That looks like a {other.label} key, but the provider is set "
+                f"to {spec.label}. Switch the provider to {other.label}, or "
+                f"paste a {spec.label} key ({spec.console_url})."
+            )
         return True, ""
+
+    def key_mismatch(self) -> Optional[str]:
+        """The provider this key's prefix belongs to, when it isn't the chosen one."""
+        from .llm import key_provider_hint  # local import: llm imports this module
+        spec = self.spec()
+        if not spec.requires_key:
+            return None
+        hint = key_provider_hint(self.resolved_api_key())
+        return hint if hint and hint != spec.key else None

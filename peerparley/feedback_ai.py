@@ -47,6 +47,7 @@ from . import ai_prompts
 from .aiconfig import AISettings, get_provider
 from .grading import StudentResult, TeamResult
 from .llm import (
+    AuthLLMError,
     LLMClient,
     LLMError,
     TruncatedResponseError,
@@ -507,6 +508,10 @@ def generate_draft(
     truncated = False
     try:
         payload = client.complete_json(system, user, max_tokens=settings.max_tokens)
+    except AuthLLMError:
+        # Not this student's problem, and not survivable by moving to the next
+        # one. Let it out so the batch can stop at the first occurrence.
+        raise
     except TruncatedResponseError as exc:
         # Salvage: the fields that finished are complete and already paid for.
         payload = salvage_object_fields(exc.raw)
@@ -583,6 +588,8 @@ def verify_draft(client: LLMClient, draft: Draft, src: FeedbackSource) -> None:
         payload = client.complete_json(
             ai_prompts.VERIFY_SYSTEM, user, max_tokens=1200
         )
+    except AuthLLMError:
+        raise
     except Exception as exc:
         # A failed audit is not a passed audit. Say the check did not run and
         # leave the draft for a human read rather than quietly blessing it.
@@ -634,6 +641,18 @@ def verify_draft(client: LLMClient, draft: Draft, src: FeedbackSource) -> None:
 # Batch
 # --------------------------------------------------------------------------- #
 
+class BatchAborted(RuntimeError):
+    """A batch stopped on a failure that would repeat for every remaining student.
+
+    Carries ``drafts``: whatever completed before the stop, so the review panel
+    can keep that work instead of discarding it alongside the error.
+    """
+
+    def __init__(self, message: str, drafts: Optional[Dict[str, Draft]] = None):
+        super().__init__(message)
+        self.drafts: Dict[str, Draft] = drafts or {}
+
+
 def make_client(settings: AISettings,
                 on_usage: Optional[Callable] = None) -> LLMClient:
     spec = get_provider(settings.provider)
@@ -648,6 +667,46 @@ def make_client(settings: AISettings,
         app_name="PeerParley",
         app_url="https://github.com/",
     )
+
+
+def test_credentials(settings: AISettings) -> Tuple[bool, str]:
+    """One tiny request, to find out whether the key works.
+
+    Worth its own function because the alternative is discovering a bad
+    credential forty students into a batch. The prompt is deliberately trivial —
+    a few tokens, costing effectively nothing — and the reply's content is
+    irrelevant: what is being tested is whether the provider accepts the key at
+    all.
+    """
+    ready, why = settings.ready()
+    if not ready:
+        return False, why
+    try:
+        client = make_client(settings)
+    except LLMError as exc:
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Could not build the client: {exc}"
+
+    try:
+        client.complete("Reply with the single word OK.", "Ready?", max_tokens=16)
+    except AuthLLMError as exc:
+        return False, str(exc)
+    except TruncatedResponseError:
+        # It answered, then ran out of room. The credential is fine, which is
+        # the only thing being asked.
+        return True, ""
+    except LLMError as exc:
+        # Reached the provider and got a non-auth failure — a bad model name, a
+        # rate limit, a local server that is not running. Not a key problem, and
+        # saying so saves the instructor from rotating a working key.
+        return False, (
+            f"The key was accepted, but the request failed: {exc} "
+            "Check the model name (and, for a local server, that it is running)."
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Unexpected error: {exc}"
+    return True, ""
 
 
 def generate_for_teams(
@@ -680,7 +739,13 @@ def generate_for_teams(
         if progress:
             progress(i, total, m.name)
         src = build_source(m, include_ratings=settings.include_ratings)
-        drafts[m.key] = generate_draft(client, src, settings)
+        try:
+            drafts[m.key] = generate_draft(client, src, settings)
+        except AuthLLMError as exc:
+            # Stop here. Every remaining student would fail the same way, and
+            # forty copies of one credential error is worse than one — it hides
+            # the answer instead of delivering it. Whatever finished is kept.
+            raise BatchAborted(str(exc), drafts) from exc
 
     return drafts
 
@@ -699,6 +764,21 @@ def approved_narratives(drafts: Dict[str, Draft]) -> Dict[str, str]:
     }
 
 
+def error_groups(drafts: Dict[str, Draft]) -> List[Tuple[str, List[str]]]:
+    """Failures grouped by message, worst-shared-first.
+
+    Forty students failing for one reason is one problem, and listing it forty
+    times hides that. Auth failures now abort the batch, but a wrong model name
+    fails per-request and would still fill the panel with identical rows, so the
+    panel groups whatever repeats.
+    """
+    buckets: Dict[str, List[str]] = {}
+    for d in (drafts or {}).values():
+        if not d.ok:
+            buckets.setdefault(d.error.strip(), []).append(d.name)
+    return sorted(buckets.items(), key=lambda kv: -len(kv[1]))
+
+
 def batch_stats(drafts: Dict[str, Draft]) -> Dict[str, Any]:
     """Counts for the review header."""
     values = list((drafts or {}).values())
@@ -707,6 +787,11 @@ def batch_stats(drafts: Dict[str, Draft]) -> Dict[str, Any]:
         usage.add(d.usage)
     return {
         "total": len(values),
+        # Drafts that actually produced usable text. "total" counts Draft
+        # objects, and a failure is still a Draft — so reporting "total" as the
+        # number drafted tells an instructor 40 narratives were written when
+        # none were. This is the number that belongs on screen.
+        "written": sum(1 for d in values if d.ok and d.text().strip()),
         "approved": sum(1 for d in values if d.approved),
         "clean": sum(1 for d in values if d.clean),
         "flagged": sum(1 for d in values if d.ok and d.flags),

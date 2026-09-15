@@ -42,6 +42,20 @@ class TransientLLMError(LLMError):
     """Rate limits, overloads, timeouts — worth retrying."""
 
 
+class AuthLLMError(LLMError):
+    """The provider rejected the credential.
+
+    Its own type because it is the one failure that is *global* rather than
+    per-request. A rate limit on student fourteen says nothing about student
+    fifteen; a rejected API key says everything about all of them. Without this
+    distinction a batch of forty students produces forty identical 401s, which
+    bills nothing but wastes the instructor's time and buries the one fact that
+    matters under thirty-nine copies of itself.
+
+    Callers abort the batch on this rather than continuing.
+    """
+
+
 class TruncatedResponseError(LLMError):
     """The model stopped mid-reply because it hit its output limit.
 
@@ -111,6 +125,34 @@ PRICING: Dict[str, Tuple[float, float]] = {
 # finishes, short enough that a hung server does not hold the run open all
 # afternoon.
 LOCAL_TIMEOUT_SECONDS = 600.0
+
+
+# Distinctive key prefixes, used only to catch a key pasted into the wrong
+# provider — a slip that produces a bare 401 and no hint as to why.
+_KEY_PREFIXES = (
+    ("sk-or-", "openrouter"),
+    ("sk-ant-", "anthropic"),
+    ("xai-", "xai"),
+    ("AIza", "gemini"),
+    ("sk-proj-", "openai"),
+    ("sk-svcacct-", "openai"),
+)
+
+
+def key_provider_hint(api_key: str) -> Optional[str]:
+    """Which provider a key's prefix suggests, or None when it is ambiguous.
+
+    Deliberately conservative. A bare ``sk-`` could be OpenAI or an older
+    OpenRouter key, so it returns None rather than guessing and sending someone
+    to change a setting that was already right.
+    """
+    key = (api_key or "").strip()
+    if not key:
+        return None
+    for prefix, provider in _KEY_PREFIXES:
+        if key.startswith(prefix):
+            return provider
+    return None
 
 
 def estimate_cost(model: str, usage: Usage) -> float:
@@ -232,9 +274,51 @@ class LLMClient:
             # the same truncated reply and bills for it again.
             raise
         except Exception as exc:
+            # Auth is checked first: some providers return 401 with wording that
+            # also matches a transient marker ("connection"), and retrying a
+            # rejected key four times with backoff just makes the failure slow.
+            if _is_auth(exc):
+                raise AuthLLMError(self._auth_help(exc)) from exc
             if _is_transient(exc):
                 raise TransientLLMError(str(exc)) from exc
             raise LLMError(f"{self.spec.label} request failed: {exc}") from exc
+
+    def _auth_help(self, exc: Exception) -> str:
+        """Turn a provider's auth rejection into something actionable."""
+        spec = self.spec
+        detail = str(exc).strip()
+        lines = [f"{spec.label} rejected the API key."]
+
+        if "user not found" in detail.lower():
+            lines.append(
+                "OpenRouter answers \"User not found\" when it does not "
+                "recognise the key at all — the key was deleted, the account "
+                "was removed, or what was pasted is not an OpenRouter key."
+            )
+
+        mismatch = key_provider_hint(self.api_key)
+        if mismatch and mismatch != spec.key:
+            other = get_provider(mismatch)
+            lines.append(
+                f"This key's prefix belongs to {other.label}, not to "
+                f"{spec.label}. Either switch the provider to {other.label}, "
+                f"or paste a key from {spec.label}."
+            )
+        elif self.api_key and self.api_key != self.api_key.strip():
+            lines.append(
+                "The key has leading or trailing whitespace, which some "
+                "providers reject — check for a stray space or newline."
+            )
+
+        if spec.key == "openrouter":
+            lines.append(
+                "Note that the free model router still needs a valid "
+                "OpenRouter key: the models cost nothing, but the account is "
+                "still what authenticates the request."
+            )
+        if spec.console_url:
+            lines.append(f"Check or create a key at {spec.console_url}")
+        return " ".join(lines)
 
     def complete(
         self,
@@ -469,6 +553,24 @@ def salvage_object_fields(raw: str) -> Dict[str, Any]:
         if isinstance(data, dict):
             return data
     return {}
+
+
+# Every provider phrases a bad credential differently. OpenRouter in particular
+# answers "User not found." for a key it does not recognise, which reads like a
+# problem with the *student* rather than the key — so it is worth translating.
+_AUTH_MARKERS = (
+    "401", "403", "user not found", "invalid api key", "invalid_api_key",
+    "incorrect api key", "no auth credentials", "unauthorized",
+    "authentication", "api key not valid", "invalid authentication",
+    "permission_denied", "invalid x-api-key",
+)
+
+
+def _is_auth(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    # A 403 can also mean "region blocked" or "model not allowed", but the fix
+    # in every case starts with the credential, so it lands here.
+    return any(m in text for m in _AUTH_MARKERS)
 
 
 def _is_transient(exc: Exception) -> bool:

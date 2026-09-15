@@ -535,3 +535,174 @@ def test_long_narrative_paginates_without_crashing(student):
         student, "2", "MGT 301",
         narrative="\n\n".join(["A long paragraph of peer feedback. " * 25] * 8))
     assert pdf.startswith(b"%PDF") and len(pdf) > 3000
+
+
+# --------------------------------------------------------------------------- #
+# Credential failures (added after a live run produced 40 identical 401s)
+# --------------------------------------------------------------------------- #
+
+from peerparley.llm import AuthLLMError, key_provider_hint  # noqa: E402
+
+
+class AuthFailClient(FakeClient):
+    """Rejects every request the way a provider with a bad key does."""
+
+    def complete_json(self, system, user, max_tokens=None):
+        self.prompts.append((system, user))
+        raise AuthLLMError("OpenRouter rejected the API key. User not found.")
+
+
+def test_auth_failure_escapes_generate_draft(student, settings):
+    """It must not be buried in a per-student Draft like a normal error.
+
+    A rate limit on one student says nothing about the next; a rejected key says
+    everything about all of them, so it has to be distinguishable.
+    """
+    with pytest.raises(AuthLLMError):
+        fai.generate_draft(AuthFailClient(), fai.build_source(student), settings)
+
+
+def test_batch_aborts_on_first_auth_failure(student, settings):
+    """40 students must cost one error, not forty."""
+    from peerparley.grading import TeamResult
+
+    members = []
+    for i in range(6):
+        m = make_student(name=f"Student {i}", key=f"s{i}")
+        m.contributions = ["Built the model and explained it to everyone twice."]
+        m.improvements = ["Sometimes sends updates very late in the evening."]
+        members.append(m)
+    teams = [TeamResult(team="1", members=members, team_score=100.0)]
+
+    client = AuthFailClient()
+    with pytest.raises(fai.BatchAborted) as caught:
+        fai.generate_for_teams(teams, settings, client=client)
+
+    # Stopped at the first student rather than trying all six.
+    assert len(client.prompts) == 1
+    assert "User not found" in str(caught.value)
+    assert caught.value.drafts == {}
+
+
+def test_batch_abort_keeps_the_drafts_already_finished(student, settings):
+    """Partial work survives the stop; discarding it would be a second failure."""
+    from peerparley.grading import TeamResult
+
+    good = make_student(name="First Student", key="ok")
+    good.contributions = ["Built the regression model and walked us through it."]
+    good.improvements = ["Sends updates late at night so we read them next day."]
+    bad = make_student(name="Second Student", key="fails")
+    bad.contributions = ["Rebuilt the slide deck the night before the talk."]
+    bad.improvements = ["Went quiet for a week without telling the team."]
+    teams = [TeamResult(team="1", members=[good, bad], team_score=100.0)]
+
+    payload = {
+        "strengths": "Your teammates credited you with building the model.",
+        "strength_points": [{
+            "point": "You built the regression model.",
+            "source": "Built the regression model and walked us through it.",
+            "raised_by": 1}],
+        "focus": "", "focus_points": [], "disagreement": "",
+        "insufficient_evidence": "",
+    }
+
+    class OneThenAuthFail(FakeClient):
+        def complete_json(self, system, user, max_tokens=None):
+            self.prompts.append((system, user))
+            self.usage.add(Usage(400, 150, 1))
+            if len(self.prompts) == 1:
+                return payload
+            raise AuthLLMError("rejected: 401 invalid api key")
+
+    with pytest.raises(fai.BatchAborted) as caught:
+        fai.generate_for_teams(teams, settings, client=OneThenAuthFail())
+
+    assert set(caught.value.drafts) == {"ok"}
+    assert caught.value.drafts["ok"].ok
+
+
+def test_401_is_not_retried_as_transient():
+    """Retrying a rejected key four times with backoff only makes it slow."""
+    from peerparley.llm import _is_auth, _is_transient
+
+    for message in ("Error code: 401 - {'error': {'message': 'User not found.'}}",
+                    "invalid api key provided",
+                    "403 permission_denied",
+                    "invalid x-api-key"):
+        assert _is_auth(Exception(message)), message
+    # Genuinely transient things still retry.
+    assert _is_transient(Exception("429 rate limit exceeded"))
+    assert not _is_auth(Exception("429 rate limit exceeded"))
+
+
+def test_key_prefix_identifies_the_wrong_provider():
+    assert key_provider_hint("sk-ant-api03-abc") == "anthropic"
+    assert key_provider_hint("sk-or-v1-abc") == "openrouter"
+    assert key_provider_hint("xai-abc") == "xai"
+    assert key_provider_hint("AIzaSyAbc") == "gemini"
+    # A bare sk- is ambiguous between vendors, so it must not guess.
+    assert key_provider_hint("sk-abcdef") is None
+    assert key_provider_hint("") is None
+    assert key_provider_hint("   sk-ant-spaced  ") == "anthropic"
+
+
+def test_wrong_provider_key_is_caught_before_any_request():
+    """The check that would have saved 40 calls."""
+    s = AISettings(enabled=True, provider="openrouter",
+                   model="openrouter/free", api_key="sk-ant-api03-xxxx")
+    assert s.key_mismatch() == "anthropic"
+    ok, why = s.ready()
+    assert not ok
+    assert "Anthropic" in why and "OpenRouter" in why
+
+
+def test_matching_key_is_not_flagged():
+    s = AISettings(enabled=True, provider="openrouter",
+                   model="openrouter/free", api_key="sk-or-v1-xxxx")
+    assert s.key_mismatch() is None
+    assert s.ready()[0]
+
+
+def test_api_key_is_stripped():
+    """A pasted key with a trailing newline is the classic silent 401."""
+    s = AISettings(enabled=True, provider="openai", model="gpt-4.1",
+                   api_key="  sk-abc123\n")
+    assert s.resolved_api_key() == "sk-abc123"
+
+
+def test_written_count_excludes_failures():
+    """"Drafted 40" over forty failures is how a run looks successful when it wasn't."""
+    drafts = {
+        "a": fai.Draft(key="a", name="A", team="1", strengths="Real text."),
+        "b": fai.Draft(key="b", name="B", team="1", error="401 rejected"),
+        "c": fai.Draft(key="c", name="C", team="1", error="401 rejected"),
+        "d": fai.Draft(key="d", name="D", team="1",
+                       insufficient_evidence="Too few comments."),
+    }
+    st = fai.batch_stats(drafts)
+    assert st["total"] == 4        # four Draft objects exist
+    assert st["written"] == 1      # but only one produced text
+    assert st["errors"] == 2
+    assert st["thin"] == 1
+
+
+def test_error_groups_collapse_a_shared_failure():
+    same = "OpenRouter rejected the API key."
+    drafts = {
+        str(i): fai.Draft(key=str(i), name=f"S{i}", team="1", error=same)
+        for i in range(5)
+    }
+    drafts["odd"] = fai.Draft(key="odd", name="Odd", team="2",
+                              error="model not found: typo-4.1")
+    drafts["ok"] = fai.Draft(key="ok", name="Fine", team="2", strengths="Text.")
+
+    groups = fai.error_groups(drafts)
+    assert groups[0][0] == same          # biggest shared cause first
+    assert len(groups[0][1]) == 5
+    assert groups[1][1] == ["Odd"]
+    assert all("Fine" not in names for _, names in groups)
+
+
+def test_error_groups_empty_when_nothing_failed():
+    assert fai.error_groups({
+        "a": fai.Draft(key="a", name="A", team="1", strengths="Text.")}) == []

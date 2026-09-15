@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.1.2 — the panel no longer reports failures as drafts
+
+A second live run made the reporting problem plain: the header read
+**"Drafted 40"** while forty requests had failed and nothing had been written.
+That is worse than an error, because it looks like success.
+
+- **"Written" replaces "Drafted"** as the headline metric, counting only drafts
+  that produced usable text. `batch_stats` gains `written`; `total` still counts
+  Draft objects, and a failure is still a Draft — which is exactly why it was
+  the wrong number to show.
+- **A "Failed" metric** sits beside it, so failures are visible rather than
+  inferred from the absence of drafts.
+- **The post-batch summary is an error, not a success, when nothing was
+  written.**
+- **Repeated failures collapse into one banner** (`error_groups`) naming the
+  count and the affected students. Auth failures already abort the batch, but a
+  wrong model name fails per-request and would still have filled the panel with
+  identical rows.
+- 3 new tests (51 total).
+
+## 2.1.1 — credential failures report once, not forty times
+
+Found by a live run against a 40-student section: an OpenRouter key that
+returned `401 - User not found` produced forty identical failures, one per
+student. Every one of them was the same fact, and the fortieth was no more
+informative than the first.
+
+- **`AuthLLMError`** distinguishes a rejected credential from a per-request
+  failure. A rate limit on student fourteen says nothing about student fifteen;
+  a bad key says everything about all of them.
+- **The batch stops at the first auth failure** (`BatchAborted`), keeping every
+  draft that finished before the stop, and the review panel shows one message
+  instead of a wall of them.
+- **Auth is classified before the transient check.** Some providers phrase a 401
+  with wording that also matches a transient marker, which would have retried a
+  dead key four times with backoff.
+- **Provider-specific guidance** replaces the raw JSON dump — including that
+  OpenRouter says "User not found" for a key it doesn't recognise, and that the
+  free router still needs a valid key (free models, not an anonymous account).
+- **Wrong-vendor keys are caught before any request.** A key whose prefix
+  belongs to another provider (`sk-ant-` under OpenRouter, say) now fails
+  `ready()` with a message naming both, rather than costing a full batch to
+  discover. Deliberately conservative: a bare `sk-` is ambiguous, so it isn't
+  guessed.
+- **Keys are stripped on every read path.** A trailing newline in the Streamlit
+  secrets box is a classic silent 401.
+- **"Test the key"** in the sidebar: one tiny request that confirms the provider
+  accepts the key and model, and distinguishes "key rejected" from "key fine,
+  model wrong".
+- 8 new tests (48 total), and a troubleshooting section in `docs/AI_FEEDBACK.md`.
+
 ## 2.1.0 — AI feedback writer
 
 Adds an optional step between grading and delivery: each student's written peer

@@ -105,7 +105,7 @@ sidebar, then switch it on there. Full guide: **`docs/AI_FEEDBACK.md`**.
 ### Tests
 
 ```bash
-python3 -m pytest tests/ -q     # 40 unit tests, fully offline
+python3 -m pytest tests/ -q     # 51 unit tests, fully offline
 python3 qa_regression.py        # 41 end-to-end checks via Streamlit AppTest
 ```
 
@@ -153,7 +153,7 @@ See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
 │   ├── feedback_ai.py         # v2: evidence, generation, grounding, approval gate
 │   └── ai_ui.py               # v2: sidebar settings + review panel
 ├── tests/
-│   └── test_feedback_ai.py    # 40 offline tests; no API key needed
+│   └── test_feedback_ai.py    # 51 offline tests; no API key needed
 ├── qa_regression.py           # headless AppTest harness (41 checks)
 ├── docs/
 │   └── AI_FEEDBACK.md         # the AI writer: rules, setup, cost, audit trail

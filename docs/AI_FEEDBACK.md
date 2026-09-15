@@ -152,6 +152,61 @@ local models show an exact `$0.00`.
 Rough order of magnitude for a 30-student section with the audit on (60 calls):
 a few cents on a mini/flash model, well under a dollar on a frontier one.
 
+## When every student fails at once
+
+**First: check which build is running.** The sidebar shows the version next to
+the storage backend (`Storage: local · v2.1.2`). The improvements below only
+exist from the version that introduced them, so an error whose wording doesn't
+match this document usually means the running app is older than the fix — on
+Streamlit Cloud, that means the new code hasn't been pushed and redeployed yet.
+Locally, restart `streamlit run` after replacing the files.
+
+A row of identical errors across the whole section is almost always one cause,
+not forty. The batch now stops at the first rejected request rather than
+repeating it, so you get one message instead of a wall of them, and whatever
+finished before the stop is kept.
+
+**Use "Test the key" in the sidebar first.** One tiny request, a few tokens,
+and it tells you immediately whether the provider accepts the key and the model.
+
+### `401 - User not found` (OpenRouter)
+
+OpenRouter's wording for *this key is not recognised at all*. It reads like a
+problem with the student; it is not. In rough order of likelihood:
+
+1. **The key is not an OpenRouter key.** Pasting an `sk-ant-…` or `sk-proj-…`
+   key into the OpenRouter slot gives exactly this. The app now checks the key's
+   prefix and refuses before spending a single call, but a key created before
+   that check may still be sitting in your secrets.
+2. **The key was revoked or the account removed.** Check
+   <https://openrouter.ai/keys> — if the key isn't listed, create a new one.
+3. **You expected the free router to need no key.** It does need one.
+   `openrouter/free` means the *models* cost nothing; the account is still what
+   authenticates the request. Free is not anonymous.
+4. **Whitespace.** A trailing newline in the Streamlit secrets box, or a space
+   picked up when copying. Keys are now stripped on every read path, so this is
+   fixed going forward.
+5. **Credit.** A zero balance usually gives a 402 rather than a 401, but it is
+   worth a glance at the dashboard if the key itself looks fine.
+
+### Other providers
+
+| Message | Usually means |
+|---|---|
+| `401 invalid_api_key` (OpenAI) | Revoked key, or a project key used against the wrong org. |
+| `401 invalid x-api-key` (Anthropic) | Key deleted, or an OpenRouter key pasted in. |
+| `API key not valid` (Gemini) | Key restricted by referrer/IP, or the Generative Language API not enabled on that project. |
+| `403` anywhere | Sometimes region or model permission rather than the key — the message says the key was accepted if that's the case. |
+| Connection refused (local) | Ollama or LM Studio isn't running, or the port differs (11434 vs 1234). |
+
+### Not a key problem
+
+If "Test the key" says the key was accepted but the request failed, the
+credential is fine — check the model name. A custom model ID with a typo, or a
+model your account has no access to, fails per-request rather than globally, so
+those still appear per student and are worth retrying with **Draft the
+remaining** after fixing.
+
 ## Turning it off
 
 Untick *Enable* in the sidebar, or untick "Summary of your peer feedback" under
@@ -169,7 +224,7 @@ grading changes either way.
 | `peerparley/ai_prompts.py` | Every prompt, in one file, meant to be edited |
 | `peerparley/feedback_ai.py` | Evidence assembly, generation, citation check, audit, approval gate |
 | `peerparley/ai_ui.py` | Sidebar settings and the review panel |
-| `tests/test_feedback_ai.py` | 40 offline tests; no API key needed |
+| `tests/test_feedback_ai.py` | 51 offline tests; no API key needed |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to
