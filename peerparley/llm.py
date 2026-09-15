@@ -155,6 +155,17 @@ def key_provider_hint(api_key: str) -> Optional[str]:
     return None
 
 
+def register_pricing(rates: Dict[str, Tuple[float, float]]) -> None:
+    """Merge live prices (OpenRouter's catalog) into the table above.
+
+    Live figures beat the static ones, which are only a starting point for
+    providers with no price API. Called by the OpenRouter picker on every run,
+    so the cost meter quotes what OpenRouter is charging today rather than what
+    it charged when this file was written.
+    """
+    PRICING.update(rates)
+
+
 def estimate_cost(model: str, usage: Usage) -> float:
     """Best-effort USD estimate. Returns 0.0 for models with no listed price."""
     inp, out = PRICING.get(model, (0.0, 0.0))
@@ -439,6 +450,22 @@ class LLMClient:
 
         finish = str(getattr(choices[0], "finish_reason", "") or "").lower()
         content = choices[0].message.content or ""
+
+        # An empty reply is not a truncated one, whatever finish_reason says.
+        # OpenRouter's free router assigns a different upstream model per call
+        # and some of them answer with zero characters under load; reporting
+        # that as "stopped at its output limit after 0 characters" sends the
+        # instructor to shorten a draft that was never written. Retrying is the
+        # right move, because the next call may land on a model that answers.
+        if not content.strip():
+            raise TransientLLMError(
+                f"{self.spec.label} returned an empty reply"
+                + (f" (finish reason: {finish})" if finish else "")
+                + ". On the OpenRouter free router this usually means the model "
+                  "it picked was rate-limited or overloaded; retrying often "
+                  "lands on a working one. Pinning a specific model is more "
+                  "reliable than the free router for a whole section."
+            )
         if finish == "length":
             raise TruncatedResponseError(
                 f"{self.spec.label} stopped at its output limit after "

@@ -107,12 +107,69 @@ instructor trying this out, the sidebar is fine.
 
 | Provider | Notes |
 |---|---|
-| **OpenRouter** | Default. One key, many models. `openrouter/free` costs nothing but picks a different model per call, so wording quality varies run to run — fine for a first draft. |
+| **OpenRouter** | Default. One key, **every model OpenRouter carries** — the list is fetched live, not hardcoded. |
 | **Anthropic Claude** | Strongest at holding to the "invent nothing" rule. |
 | **OpenAI** | `gpt-4.1-mini` is the cheap option that still follows the format. |
 | **Google Gemini** | Free tier covers a course or two. |
 | **xAI Grok** | OpenAI-compatible endpoint. |
-| **On this computer** | Ollama or LM Studio. Free, and no student comment leaves the room — but only reachable when PeerParley runs on that same machine. A Streamlit Cloud deployment cannot see your laptop. |
+| **On this computer** | Ollama or LM Studio, with the model list read from your machine. Free, and no student comment leaves the room — but only reachable when PeerParley runs on that same machine. |
+
+### Choosing an OpenRouter model
+
+OpenRouter carries several hundred models and the roster turns over weekly, so
+the picker fetches `GET /api/v1/models` live (public, no key needed), caches it
+for an hour, and sorts it A–Z. A hardcoded list would be wrong within a month
+and would go on being confidently wrong — offering retired models and hiding
+new ones.
+
+- **Free models only** — filters to what OpenRouter serves at $0. 🆓 marks them
+  in the list.
+- **Filter by vendor** — narrows to `anthropic/`, `deepseek/`, and so on.
+- The dropdown is **type-to-search**, so you can jump straight to a slug.
+- **↻ Refresh list** re-fetches immediately rather than waiting out the hour.
+- **Or a slug** takes anything at all — a model released this morning, or a
+  variant not in the list.
+- Live prices feed the cost meter, so it quotes what OpenRouter charges today.
+  A model whose price OpenRouter doesn't publish shows "price not known" rather
+  than a confident $0.00.
+
+Two categories are filtered out because they cannot do this job: image and
+video generators (which appear in the same catalog) and `:batch` variants
+(asynchronous endpoints that accept a request without answering it).
+
+If the fetch fails — no network, OpenRouter down — the picker falls back to a
+bundled snapshot **and says so on screen**, so a stale list is never shown as
+though it were current. You can still type any slug by hand.
+
+A caveat specific to this task: free models are rate-limited and smaller, and
+rewording peer comments *without adding to them* punishes a weak model in a way
+that's easy to miss, because the output still reads fluently. For a whole
+section, pin a real model.
+
+### Choosing a local model
+
+The list comes from the server itself — what's offered is what you've actually
+downloaded, which is the only list that can be right. PeerParley probes the
+address, reports what answered (Ollama on 11434, LM Studio on 1234), and reads
+its models. A bare host or a missing `/v1` gets tidied up. **Check again**
+re-probes after you start the server.
+
+When the server isn't reachable, the message says *which* cause it is — nothing
+listening, wrong port, still loading a model — rather than printing an errno.
+
+If PeerParley is running on Streamlit Cloud, the picker says plainly that a
+local model cannot be reached from there and stops, instead of offering an
+address that can never work. `localhost` on Streamlit's servers means
+Streamlit's container, not your computer.
+
+### Remembering your choices
+
+**💾 Remember these settings** saves your provider, model, tone, length and
+grounding options to your account, so you don't re-pick them on every sign-in.
+
+**Your API key is never saved.** Its whole security story is that it lives in
+session memory and dies with the session; persisting it for convenience would
+make that promise false. Put it in the app's secrets if you want it to persist.
 
 ## Using it
 
@@ -207,6 +264,36 @@ model your account has no access to, fails per-request rather than globally, so
 those still appear per student and are worth retrying with **Draft the
 remaining** after fixing.
 
+## Your work is saved
+
+Drafts, your edits, and your approvals are written to the encrypted vault as you
+go, keyed to the survey you're working on. Sign out, come back tomorrow, open
+the Results tab, and the panel restores what you'd done — it says so when it
+does. Nothing is lost to a closed laptop or an idle session timing out.
+
+Because they go to the vault, they are Fernet-encrypted like every other piece
+of student data here; the storage provider holds ciphertext. Saving is
+best-effort — if the vault is unreachable the panel warns you that the work
+won't survive signing out, but it stays in the session meanwhile.
+
+**If you change the Fernet key**, previously saved drafts become unreadable.
+The panel tells you that explicitly rather than showing an empty review, since
+the two mean very different things.
+
+## Drafting only what's left
+
+Two buttons, and the difference matters:
+
+| Button | What it does |
+|---|---|
+| **↻ Draft only the N not yet done** | Students with no draft, plus any that failed. Leaves every finished draft — and your edits and approvals on them — untouched. This is the one to use after a partial run. |
+| **Redo all N** | Starts over for everybody, discarding finished drafts along with their edits and approvals. |
+
+The retry button is the primary (highlighted) one whenever finished drafts
+exist, because it's the one that can't lose work. A caption beside them shows
+the split — "31 done, 9 to go" — so you can see what a retry will actually
+touch before clicking it.
+
 ## Turning it off
 
 Untick *Enable* in the sidebar, or untick "Summary of your peer feedback" under
@@ -223,8 +310,10 @@ grading changes either way.
 | `peerparley/llm.py` | Provider-agnostic client, retries, JSON recovery, pricing |
 | `peerparley/ai_prompts.py` | Every prompt, in one file, meant to be edited |
 | `peerparley/feedback_ai.py` | Evidence assembly, generation, citation check, audit, approval gate |
-| `peerparley/ai_ui.py` | Sidebar settings and the review panel |
-| `tests/test_feedback_ai.py` | 51 offline tests; no API key needed |
+| `peerparley/ai_ui.py` | Sidebar settings, model pickers, and the review panel |
+| `peerparley/openrouter_catalog.py` | The live OpenRouter catalog (ported from TransQ) |
+| `peerparley/localmodels.py` | Local server probing and model discovery (ported from TransQ) |
+| `tests/test_feedback_ai.py` | 84 offline tests; no API key needed |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to

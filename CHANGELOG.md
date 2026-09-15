@@ -1,5 +1,105 @@
 # Changelog
 
+## 2.3.0 — the model flexibility TransQ had, restored
+
+v2 shipped OpenRouter with seven hardcoded model slugs and a free-text box.
+TransQ fetched the whole catalogue live; trimming it to a curated handful was
+the wrong call, and it also quietly dropped two other things TransQ did. All
+three are ported back.
+
+### Every model OpenRouter carries
+
+`peerparley/openrouter_catalog.py`, ported from TransQ essentially unchanged:
+`GET /api/v1/models` fetched live (public, no key), cached an hour, sorted A–Z.
+A hardcoded list would be wrong within a month and would go on being
+confidently wrong.
+
+- Free-only toggle and a vendor filter, with a type-to-search dropdown.
+- 🆓 marks models priced at $0 — decided by the **price**, not by a `:free`
+  suffix.
+- **↻ Refresh list** busts the cache without waiting out the hour; **Or a slug**
+  accepts anything at all.
+- Live prices are merged into the cost meter via a newly ported
+  `llm.register_pricing`, so it quotes today's rates. A model whose price
+  OpenRouter doesn't publish reads "price not known" rather than $0.00, which
+  would understate a real bill.
+- Image/video generators and `:batch` variants are filtered out — they're in the
+  same catalogue and cannot answer.
+- A failed fetch falls back to a bundled snapshot **and says so on screen**, so
+  a stale list is never shown as current.
+
+### Local models read from the machine
+
+`peerparley/localmodels.py`, also from TransQ. The previous free-text box asked
+the instructor to remember what they'd downloaded; the server already knows.
+Probes the address, names what answered, lists its models, and tolerates both
+the OpenAI `/models` shape and Ollama's native one. Unreachable servers get the
+actual cause — nothing listening, wrong port, still loading — not an errno.
+
+On Streamlit Cloud the picker says plainly that a local model cannot be reached
+and stops, rather than offering an address that can never work.
+
+### Settings remembered per instructor
+
+Provider, model, tone, length and grounding options save to the vault per user,
+so they aren't re-picked on every sign-in. **The API key is deliberately
+excluded**: its whole security story is that it dies with the session, and
+persisting it for convenience would make that promise false. Asserted by a test.
+
+21 new tests (84 total).
+
+## 2.2.0 — drafts persist, and retry means retry
+
+Three problems from a live 40-student run, all of which cost real work.
+
+### Partial results survive the session
+
+Drafts lived only in `st.session_state`, so signing out — or Streamlit
+recycling an idle session — discarded them. That was the worst of the three: a
+draft costs an API call, but the edits and approvals layered on top cost the
+instructor's judgement, which is the expensive part.
+
+Drafts now save to the **same encrypted vault as everything else**, keyed per
+survey (`aidrafts__<slug>.json`), and are restored when the panel opens. Edits,
+approvals, flags, citations and per-draft token counts all round-trip.
+
+- Vault-stored rather than local, because a draft contains a student's name and
+  their teammates' comments; `Vault.put_bytes` Fernet-encrypts before the bytes
+  leave the process, so the provider holds ciphertext.
+- Saving is best-effort and never raises — a storage hiccup must not cost the
+  in-memory work it was protecting. If it fails, the panel says so, naming
+  durability rather than claiming data loss.
+- A fingerprint guards the write, so an idle rerun doesn't re-upload forty
+  drafts on every keystroke.
+- Keyed per survey, so one cohort's narratives can never load under another's.
+- An *unreadable* save (changed Fernet key) reports itself, rather than looking
+  like "you never drafted anything".
+
+### Retry only touches what's outstanding
+
+The panel offered "Draft the 40 remaining" next to "38 failed". Two causes:
+
+- The button label was rendered *before* the batch ran, so it showed pre-batch
+  counts. The panel now reruns after a batch, so labels and metrics agree.
+- The retry is now the **primary** action whenever finished drafts exist, since
+  it is the one that cannot destroy them, and it says exactly what it will do
+  ("Draft only the N not yet done"). "Draft feedback for all" is relabelled
+  **"Redo all N"** and its help text states plainly that it discards finished
+  drafts along with their edits and approvals.
+
+### The free router's empty replies
+
+38 of 40 students failed with "stopped at its output limit after 0 characters".
+An empty completion is not a truncated one, whatever `finish_reason` says — and
+reporting it that way sends the instructor to shorten a draft that was never
+written. OpenRouter's free router assigns a different upstream model per call and
+some answer with nothing under load, so an empty reply is now a **transient**
+failure that retries automatically, with a message saying that pinning a model
+beats the free router for a whole section. A genuinely partial reply is still
+treated as truncation and still salvaged.
+
+12 new tests (63 total) and 12 new end-to-end checks (53 total).
+
 ## 2.1.2 — the panel no longer reports failures as drafts
 
 A second live run made the reporting problem plain: the header read

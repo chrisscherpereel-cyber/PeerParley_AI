@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:  # Streamlit is present at runtime but not in unit tests.
     import streamlit as st
@@ -81,13 +81,19 @@ PROVIDERS: Dict[str, Provider] = {
         label="OpenRouter",
         sdk="openai",
         env_var="OPENROUTER_API_KEY",
+        # A seed only — the first entry is the default selection. The real
+        # list is fetched live in peerparley/openrouter_catalog.py, because
+        # OpenRouter carries several hundred models and the roster turns over
+        # weekly; a list hardcoded here would be wrong within a month and would
+        # go on being confidently wrong, hiding new models and offering retired
+        # ones.
         models=(
             FREE_ROUTER,
             "anthropic/claude-sonnet-4.5",
             "openai/gpt-4.1",
+            "openai/gpt-4.1-mini",
             "google/gemini-3.8-flash",
             "deepseek/deepseek-v4-flash",
-            "deepseek/deepseek-v3.2",
             "x-ai/grok-4.6",
         ),
         base_url="https://openrouter.ai/api/v1",
@@ -97,7 +103,8 @@ PROVIDERS: Dict[str, Provider] = {
         supports_json_mode=False,
         allow_custom_model=True,
         console_url="https://openrouter.ai/keys",
-        note="One key, many models — including a free router for trying this out.",
+        note=("One key, every model OpenRouter carries — the list is fetched "
+              "live. Includes a free router for trying this out."),
     ),
     "anthropic": Provider(
         key="anthropic",
@@ -211,6 +218,75 @@ def configured_providers() -> List[str]:
         k for k, p in PROVIDERS.items()
         if not p.requires_key or get_secret(p.env_var)
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Saved preferences
+# --------------------------------------------------------------------------- #
+#
+# TransQ remembered each instructor's provider and model; v2 initially lost
+# that, so the model had to be re-picked on every sign-in. Stored per user in
+# the same encrypted vault as everything else.
+#
+# The API key is deliberately NOT included. It is the one field whose whole
+# security story is that it lives in session memory and dies with the session;
+# persisting it "for convenience" would quietly move it to disk and make the
+# promise in docs/AI_FEEDBACK.md false.
+
+SETTINGS_FIELDS = (
+    "enabled", "provider", "model", "temperature", "max_tokens", "tone",
+    "target_words", "verify", "verify_threshold", "local_base_url",
+    "include_ratings", "extra_guidance",
+)
+
+
+def settings_key(username: str) -> str:
+    return f"aisettings__{(username or 'default').strip().lower()}.json"
+
+
+def save_settings(vault: Any, username: str, settings: "AISettings") -> Tuple[bool, str]:
+    """Persist everything except the credential. Never raises."""
+    try:
+        import json
+        payload = {f: getattr(settings, f) for f in SETTINGS_FIELDS}
+        payload["version"] = 1
+        vault.put_bytes(
+            settings_key(username),
+            json.dumps(payload, default=str).encode("utf-8"),
+        )
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def load_settings(vault: Any, username: str) -> Optional["AISettings"]:
+    """Saved settings, or None when nothing is stored (the normal first run)."""
+    try:
+        import json
+        data = json.loads(vault.get_bytes(settings_key(username)).decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    s = AISettings()
+    for f in SETTINGS_FIELDS:
+        if f not in data:
+            continue
+        current = getattr(s, f)
+        value = data[f]
+        try:
+            if isinstance(current, bool):
+                value = bool(value)
+            elif isinstance(current, int) and not isinstance(current, bool):
+                value = int(value)
+            elif isinstance(current, float):
+                value = float(value)
+            else:
+                value = str(value)
+        except (TypeError, ValueError):
+            continue
+        setattr(s, f, value)
+    return s
 
 
 # --------------------------------------------------------------------------- #

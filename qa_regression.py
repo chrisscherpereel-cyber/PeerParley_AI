@@ -345,6 +345,48 @@ check("too-thin evidence skips the API entirely",
       bool(d_thin.insufficient_evidence) and empty_client.usage.calls == 0)
 check("a thin draft contributes no narrative", d_thin.text() == "")
 
+# --------------------------------------------------------------------------- #
+# Partial results survive a session ending
+# --------------------------------------------------------------------------- #
+class _MemVault:
+    def __init__(self): self.store = {}
+    def put_bytes(self, name, data): self.store[name] = bytes(data); return name
+    def get_bytes(self, name): return self.store[name]
+    def delete(self, name): self.store.pop(name, None)
+
+
+mv = _MemVault()
+part = {}
+part[target.key] = d_ok                      # reviewed, edited, approved above
+part["broken"] = fai.Draft(key="broken", name="Failed Student", team="9",
+                           error="401 rejected")
+ok_save, save_err = fai.save_drafts(mv, "qa-slug", part)
+check("partial results save to the vault", ok_save)
+
+reloaded, load_err = fai.load_drafts(mv, "qa-slug")
+check("they load back after a sign-out", load_err == "" and len(reloaded) == 2)
+check("the approval survives", reloaded[target.key].approved)
+check("the instructor's edit survives",
+      reloaded[target.key].text() == "The instructor's own wording.")
+check("the failure is still marked failed", not reloaded["broken"].ok)
+check("the approval gate means the same after reload",
+      set(fai.approved_narratives(reloaded)) == {target.key})
+check("nothing saved yet is not an error",
+      fai.load_drafts(mv, "no-such-survey") == ({}, ""))
+check("drafts are keyed per survey",
+      fai.drafts_key("qa-slug") != fai.drafts_key("other-slug"))
+check("the fingerprint suppresses a no-op re-save",
+      fai.fingerprint(reloaded) == fai.fingerprint(reloaded))
+
+# Selective retry: only outstanding students are regenerated.
+member_keys = [m.key for t in teams for m in t.members]
+_missing = [k for k in member_keys if k not in part]
+_failed = [k for k, d in part.items() if not d.ok]
+_done = [k for k, d in part.items() if d.ok and d.text().strip()]
+check("retry targets exclude finished drafts", target.key not in (_missing + _failed))
+check("retry targets include the failed one", "broken" in _failed)
+check("finished work is counted as done", _done == [target.key])
+
 print("\n== SUMMARY ==")
 passed = sum(1 for _, ok in results if ok)
 print(f"{passed}/{len(results)} checks passed")

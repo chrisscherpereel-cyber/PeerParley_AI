@@ -706,3 +706,499 @@ def test_error_groups_collapse_a_shared_failure():
 def test_error_groups_empty_when_nothing_failed():
     assert fai.error_groups({
         "a": fai.Draft(key="a", name="A", team="1", strengths="Text.")}) == []
+
+
+# --------------------------------------------------------------------------- #
+# Persistence and selective retry
+# (added after a live run lost reviewed drafts on sign-out, and offered to
+#  re-draft all 40 students when only 38 had failed)
+# --------------------------------------------------------------------------- #
+
+class MemoryVault:
+    """Stand-in for peerparley.vault.Vault — same 3 methods the code touches."""
+
+    def __init__(self, fail: bool = False):
+        self.store = {}
+        self.fail = fail
+        self.writes = 0
+
+    def put_bytes(self, name, data):
+        if self.fail:
+            raise RuntimeError("vault offline")
+        self.writes += 1
+        self.store[name] = bytes(data)
+        return name
+
+    def get_bytes(self, name):
+        if name not in self.store:
+            raise KeyError(name)
+        return self.store[name]
+
+    def delete(self, name):
+        self.store.pop(name, None)
+
+
+def _reviewed_batch():
+    a = fai.Draft(key="a", name="Ann Lee", team="1",
+                  strengths="Teammates valued the model you built.",
+                  focus="One asked for earlier updates.")
+    a.strength_points = [fai.Point(point="You built the model.",
+                                   source="Ann built the model.", raised_by=2)]
+    a.score, a.verified, a.quotes_checked = 0.95, True, True
+    a.flags = [fai.Flag(text="x", problem="overstated count", severity="low")]
+    a.approved = True
+    a.edited = "The instructor's own wording, kept verbatim."
+    a.usage = Usage(500, 220, 2)
+    a.model, a.provider = "gpt-4.1", "openai"
+
+    b = fai.Draft(key="b", name="Bob Kim", team="1", error="401 rejected")
+    c = fai.Draft(key="c", name="Cara Ng", team="2",
+                  insufficient_evidence="Only 1 comment.")
+    return {"a": a, "b": b, "c": c}
+
+
+def test_drafts_survive_a_save_load_cycle():
+    """Sign out, sign back in: the review has to still be there."""
+    vault, drafts = MemoryVault(), _reviewed_batch()
+    saved, err = fai.save_drafts(vault, "mgt490c-1", drafts)
+    assert saved, err
+
+    back, err = fai.load_drafts(vault, "mgt490c-1")
+    assert err == ""
+    assert set(back) == {"a", "b", "c"}
+
+    a = back["a"]
+    assert a.approved is True
+    assert a.edited == "The instructor's own wording, kept verbatim."
+    assert a.text() == "The instructor's own wording, kept verbatim."
+    assert a.strengths.startswith("Teammates valued")
+    assert a.score == 0.95 and a.verified and a.quotes_checked
+    assert [f.problem for f in a.flags] == ["overstated count"]
+    assert a.strength_points[0].raised_by == 2
+    assert a.usage.calls == 2 and a.usage.input_tokens == 500
+    assert back["b"].error == "401 rejected" and not back["b"].ok
+    assert back["c"].insufficient_evidence == "Only 1 comment."
+
+
+def test_approved_narratives_survive_the_round_trip():
+    """The gate to student-visible text must mean the same thing after reload."""
+    vault = MemoryVault()
+    fai.save_drafts(vault, "s", _reviewed_batch())
+    back, _ = fai.load_drafts(vault, "s")
+    out = fai.approved_narratives(back)
+    assert set(out) == {"a"}
+    assert out["a"] == "The instructor's own wording, kept verbatim."
+
+
+def test_load_with_nothing_saved_is_not_an_error():
+    back, err = fai.load_drafts(MemoryVault(), "never-saved")
+    assert back == {} and err == ""
+
+
+def test_unreadable_save_reports_rather_than_pretending_it_is_absent():
+    """A changed Fernet key must not look like 'you never drafted anything'."""
+    vault = MemoryVault()
+    vault.store[fai.drafts_key("s")] = b"not json at all"
+    back, err = fai.load_drafts(vault, "s")
+    assert back == {}
+    assert "could not be read" in err
+
+
+def test_save_failure_is_reported_not_raised():
+    """The panel is mid-review; a storage hiccup must not take it down."""
+    saved, err = fai.save_drafts(MemoryVault(fail=True), "s", _reviewed_batch())
+    assert not saved and "vault offline" in err
+
+
+def test_save_without_a_slug_is_refused_clearly():
+    saved, err = fai.save_drafts(MemoryVault(), "", _reviewed_batch())
+    assert not saved and "nowhere to save" in err
+
+
+def test_drafts_are_keyed_per_survey():
+    """One cohort's narratives must never load under another's survey."""
+    vault = MemoryVault()
+    fai.save_drafts(vault, "mgt490c-1", {"a": fai.Draft(key="a", name="A", team="1",
+                                                        strengths="Eval one.")})
+    fai.save_drafts(vault, "mgt490c-2", {"z": fai.Draft(key="z", name="Z", team="9",
+                                                        strengths="Eval two.")})
+    one, _ = fai.load_drafts(vault, "mgt490c-1")
+    two, _ = fai.load_drafts(vault, "mgt490c-2")
+    assert set(one) == {"a"} and set(two) == {"z"}
+    assert fai.drafts_key("mgt490c-1") != fai.drafts_key("mgt490c-2")
+
+
+def test_fingerprint_changes_only_when_content_does():
+    """Guards against re-uploading 40 drafts on every keystroke."""
+    drafts = _reviewed_batch()
+    fp = fai.fingerprint(drafts)
+    assert fai.fingerprint(_reviewed_batch()) == fp      # same content, same fp
+
+    drafts["a"].approved = False
+    assert fai.fingerprint(drafts) != fp
+
+    drafts["a"].approved = True
+    assert fai.fingerprint(drafts) == fp                 # and back again
+
+    drafts["a"].edited += " one more clause."
+    assert fai.fingerprint(drafts) != fp
+
+
+def test_retry_targets_only_what_is_outstanding():
+    """The bug on screen: 38 failed, but the button offered to redo all 40."""
+    drafts = _reviewed_batch()                    # a=ok, b=failed, c=thin
+    member_keys = ["a", "b", "c", "d"]            # d was never drafted
+
+    missing = [k for k in member_keys if k not in drafts]
+    failed = [k for k, d in drafts.items() if not d.ok]
+    todo = missing + failed
+    done = [k for k, d in drafts.items() if d.ok and d.text().strip()]
+
+    assert missing == ["d"]
+    assert failed == ["b"]
+    assert sorted(todo) == ["b", "d"]             # not all four
+    assert done == ["a"]                          # the reviewed one is spared
+
+
+def test_regenerating_only_outstanding_keys_leaves_finished_work_alone():
+    from peerparley.grading import TeamResult
+
+    keep = make_student(name="Kept Student", key="keep")
+    keep.contributions = ["Built the regression model and explained it twice."]
+    keep.improvements = ["Sends updates late at night."]
+    redo = make_student(name="Redo Student", key="redo")
+    redo.contributions = ["Rebuilt the slide deck the night before the talk."]
+    redo.improvements = ["Went quiet for a week without telling the team."]
+    teams = [TeamResult(team="1", members=[keep, redo], team_score=100.0)]
+
+    payload = {
+        "strengths": "Your teammates credited the slide deck you rebuilt.",
+        "strength_points": [{
+            "point": "You rebuilt the slide deck.",
+            "source": "Rebuilt the slide deck the night before the talk.",
+            "raised_by": 1}],
+        "focus": "", "focus_points": [], "disagreement": "",
+        "insufficient_evidence": "",
+    }
+    client = FakeClient(payload)
+    settings = AISettings(enabled=True, provider="openai", model="gpt-4.1",
+                          api_key="k", verify=False)
+
+    fresh = fai.generate_for_teams(teams, settings, client=client,
+                                    only_keys=["redo"])
+    assert set(fresh) == {"redo"}          # "keep" was never sent
+    assert len(client.prompts) == 1
+    assert "slide deck" in client.prompts[0][1]
+    assert "regression model" not in client.prompts[0][1]
+
+
+def test_empty_reply_is_retryable_not_reported_as_truncation():
+    """The OpenRouter free router's "0 characters" wall.
+
+    An empty completion with finish_reason=length was being reported as
+    "stopped at its output limit after 0 characters", which sends the instructor
+    to shorten a draft that was never written. It is a transient failure: the
+    free router picks a different upstream model per call, so a retry may land
+    on one that answers.
+    """
+    from peerparley.llm import TransientLLMError
+
+    class _Empty:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    msg = type("M", (), {"content": ""})()
+                    ch = type("C", (), {"message": msg, "finish_reason": "length"})()
+                    return type("R", (), {"choices": [ch], "usage": None})()
+
+    from peerparley.llm import LLMClient
+    from peerparley.aiconfig import get_provider
+    c = LLMClient.__new__(LLMClient)
+    c.spec = get_provider("openrouter"); c.api_key = "sk-or-x"
+    c.model = "openrouter/free"; c.temperature = 0.2; c.max_tokens = 1600
+    c.usage = Usage(); c.on_usage = None; c._client = _Empty()
+
+    with pytest.raises(TransientLLMError) as caught:
+        c._complete_openai("s", "u", 1600, True)
+    assert "empty reply" in str(caught.value)
+    assert "0 characters" not in str(caught.value)
+
+
+def test_real_truncation_is_still_truncation():
+    """The reclassification above must not swallow a genuinely partial reply."""
+    class _Partial:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    msg = type("M", (), {"content": '{"strengths": "half a sen'})()
+                    ch = type("C", (), {"message": msg, "finish_reason": "length"})()
+                    return type("R", (), {"choices": [ch], "usage": None})()
+
+    from peerparley.llm import LLMClient
+    from peerparley.aiconfig import get_provider
+    c = LLMClient.__new__(LLMClient)
+    c.spec = get_provider("openrouter"); c.api_key = "sk-or-x"
+    c.model = "openrouter/free"; c.temperature = 0.2; c.max_tokens = 1600
+    c.usage = Usage(); c.on_usage = None; c._client = _Partial()
+
+    with pytest.raises(TruncatedResponseError) as caught:
+        c._complete_openai("s", "u", 1600, True)
+    assert caught.value.raw.startswith('{"strengths"')
+
+
+# --------------------------------------------------------------------------- #
+# The OpenRouter catalog (ported from TransQ, which had this and v2 lost it)
+# --------------------------------------------------------------------------- #
+
+from peerparley import openrouter_catalog as orc  # noqa: E402
+
+
+def _payload():
+    """Shaped like OpenRouter's real /api/v1/models response."""
+    return {"data": [
+        {"id": "anthropic/claude-sonnet-4.5", "name": "Claude Sonnet 4.5",
+         "context_length": 200000,
+         "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+         "architecture": {"output_modalities": ["text"],
+                          "modality": "text+image->text"}},
+        {"id": "deepseek/deepseek-r1:free", "name": "DeepSeek R1 (free)",
+         "context_length": 64000, "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "recraft/recraft-v3", "name": "Recraft V3",
+         "context_length": 0,
+         "pricing": {"prompt": "0.00004", "completion": "0"},
+         "architecture": {"output_modalities": ["image"]}},
+        {"id": "openai/gpt-4.1:batch", "name": "GPT-4.1 batch",
+         "context_length": 1000000,
+         "pricing": {"prompt": "0.000001", "completion": "0.000004"},
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "mystery/unpriced", "name": "No pricing",
+         "context_length": 8000, "pricing": {},
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "legacy/old-style", "name": "Modality string only",
+         "context_length": 4096,
+         "pricing": {"prompt": "0.0000005", "completion": "0.0000015"},
+         "architecture": {"modality": "text->text"}},
+    ]}
+
+
+def test_catalog_keeps_every_text_model():
+    """The point of the port: not a curated handful, everything usable."""
+    ids = [m.id for m in orc.parse_models(_payload())]
+    assert "anthropic/claude-sonnet-4.5" in ids
+    assert "deepseek/deepseek-r1:free" in ids
+    assert "legacy/old-style" in ids       # older entries have no output_modalities
+    assert "mystery/unpriced" in ids       # unknown price is not a reason to hide it
+
+
+def test_catalog_drops_what_cannot_answer():
+    ids = [m.id for m in orc.parse_models(_payload())]
+    assert "recraft/recraft-v3" not in ids      # image generator
+    assert "openai/gpt-4.1:batch" not in ids    # async batch endpoint
+
+
+def test_prices_normalise_to_per_million():
+    models = {m.id: m for m in orc.parse_models(_payload())}
+    sonnet = models["anthropic/claude-sonnet-4.5"]
+    assert sonnet.prompt_per_m == pytest.approx(3.0)
+    assert sonnet.completion_per_m == pytest.approx(15.0)
+    assert not sonnet.is_free
+    assert "$3.00/$15.00 per M" in sonnet.option_label
+
+
+def test_free_is_decided_by_price_not_by_the_slug():
+    models = {m.id: m for m in orc.parse_models(_payload())}
+    assert models["deepseek/deepseek-r1:free"].is_free
+    assert models["deepseek/deepseek-r1:free"].option_label.startswith("🆓")
+
+
+def test_unknown_price_is_not_reported_as_free():
+    """Calling a missing price $0 would understate somebody's bill."""
+    models = {m.id: m for m in orc.parse_models(_payload())}
+    unpriced = models["mystery/unpriced"]
+    assert not unpriced.is_free
+    assert not unpriced.has_known_price
+    assert unpriced.price_label == "price not known"
+    assert "mystery/unpriced" not in orc.pricing_map(orc.parse_models(_payload()))
+
+
+def test_catalog_is_sorted_and_grouped_by_vendor():
+    models = orc.parse_models(_payload())
+    assert [m.id for m in models] == sorted(m.id.lower() for m in models)
+    assert orc.vendors(models) == ["anthropic", "deepseek", "legacy", "mystery"]
+
+
+def test_free_router_is_always_offered():
+    """It's a router, not a model, so it isn't reliably in /models — but it is
+    what a new account starts on, so the picker must contain it."""
+    models = orc.parse_models(_payload())
+    assert not any(m.id == orc.FREE_ROUTER_ID for m in models)
+    withrouter = orc._with_free_router(models)
+    assert any(m.id == orc.FREE_ROUTER_ID for m in withrouter)
+    # ...and adding it twice doesn't duplicate it.
+    assert len(orc._with_free_router(withrouter)) == len(withrouter)
+
+
+def test_bundled_snapshot_is_usable_offline():
+    """The fallback must be a working list, not a placeholder."""
+    models = list(orc.FALLBACK_MODELS)
+    assert len(models) > 30
+    assert any(m.id == orc.FREE_ROUTER_ID for m in models)
+    assert len(orc.vendors(models)) > 10
+    assert orc.pricing_map(models)          # some have real prices
+
+
+def test_offline_fallback_warns_rather_than_failing_silently():
+    def _boom(timeout=0):
+        raise orc.CatalogError("Could not reach OpenRouter: offline")
+
+    real = orc.fetch_models
+    orc.fetch_models = _boom
+    try:
+        models, warning = orc.load_models()
+    finally:
+        orc.fetch_models = real
+
+    assert models and warning
+    assert "snapshot" in warning            # says which list is on screen
+    assert "by hand" in warning             # and that a slug can still be typed
+
+
+def test_malformed_response_is_an_error_not_an_empty_list():
+    """An empty list must stay recognisable as a failure, not look like zero models."""
+    with pytest.raises(orc.CatalogError):
+        orc.parse_models({"nope": []})
+
+
+def test_live_prices_reach_the_cost_meter():
+    from peerparley.llm import PRICING, estimate_cost, register_pricing
+    register_pricing(orc.pricing_map(orc.parse_models(_payload())))
+    assert PRICING["anthropic/claude-sonnet-4.5"] == pytest.approx((3.0, 15.0))
+    assert estimate_cost("anthropic/claude-sonnet-4.5",
+                         Usage(1_000_000, 0, 1)) == pytest.approx(3.0)
+
+
+# --------------------------------------------------------------------------- #
+# Local model discovery and saved preferences (the rest of TransQ's flexibility)
+# --------------------------------------------------------------------------- #
+
+from peerparley import localmodels as lm  # noqa: E402
+from peerparley.aiconfig import (  # noqa: E402
+    load_settings,
+    save_settings,
+    settings_key,
+)
+
+
+def test_local_models_come_from_the_machine_not_a_hardcoded_list():
+    """Both shapes seen in the wild: OpenAI-style and Ollama's native one."""
+    assert lm._extract_models({"data": [{"id": "mistral"}, {"id": "phi4"}]}) == \
+        ["mistral", "phi4"]
+    assert lm._extract_models(
+        {"models": [{"name": "qwen2.5:14b"}, {"name": "llama3.1:8b"}]}) == \
+        ["llama3.1:8b", "qwen2.5:14b"]          # sorted, case-insensitive
+    assert lm._extract_models({"data": ["bare-string"]}) == ["bare-string"]
+    assert lm._extract_models({"nope": 1}) == []
+    assert lm._extract_models("not a dict") == []
+
+
+def test_duplicate_local_models_are_collapsed():
+    assert lm._extract_models(
+        {"data": [{"id": "a"}, {"id": "a"}, {"id": "b"}]}) == ["a", "b"]
+
+
+def test_server_addresses_are_tidied_up():
+    """A bare host or a missing /v1 should not be the user's problem."""
+    assert lm.normalise("localhost:11434") == "http://localhost:11434/v1"
+    assert lm.normalise("http://localhost:1234") == "http://localhost:1234/v1"
+    assert lm.normalise("http://localhost:11434/v1/") == "http://localhost:11434/v1"
+
+
+def test_probe_never_raises_on_a_closed_port():
+    """A server that isn't running is the normal case, not an exception."""
+    server = lm.probe("http://127.0.0.1:9/v1", timeout=1.0)   # discard port
+    assert not server.is_usable
+    assert server.detail                      # and it explains which cause
+    assert "9" in server.detail or "reach" in server.detail.lower()
+
+
+def test_hosted_detection_is_conservative(monkeypatch):
+    """Being wrong loudly costs the credibility of every warning."""
+    monkeypatch.delenv("STREAMLIT_SHARING_MODE", raising=False)
+    monkeypatch.delenv("STREAMLIT_RUNTIME_ENV", raising=False)
+    monkeypatch.setattr(lm.os.path, "isdir", lambda p: False)
+    assert lm.is_hosted() is False
+
+    monkeypatch.setenv("STREAMLIT_RUNTIME_ENV", "cloud")
+    assert lm.is_hosted() is True
+
+
+class PrefVault:
+    def __init__(self):
+        self.store = {}
+
+    def put_bytes(self, name, data):
+        self.store[name] = bytes(data)
+        return name
+
+    def get_bytes(self, name):
+        return self.store[name]
+
+
+def test_settings_round_trip_per_user():
+    vault = PrefVault()
+    a = AISettings(enabled=True, provider="openrouter",
+                   model="anthropic/claude-sonnet-4.5", tone="direct",
+                   target_words=240, verify=False, include_ratings=False,
+                   extra_guidance="Write for sophomores.")
+    b = AISettings(enabled=True, provider="anthropic", model="claude-haiku-4-5")
+    assert save_settings(vault, "cms89", a)[0]
+    assert save_settings(vault, "other", b)[0]
+
+    back = load_settings(vault, "cms89")
+    assert back.provider == "openrouter"
+    assert back.model == "anthropic/claude-sonnet-4.5"
+    assert back.tone == "direct" and back.target_words == 240
+    assert back.verify is False and back.include_ratings is False
+    assert back.extra_guidance == "Write for sophomores."
+    assert load_settings(vault, "other").model == "claude-haiku-4-5"
+    assert settings_key("cms89") != settings_key("other")
+
+
+def test_the_api_key_is_never_persisted():
+    """Its entire security story is that it dies with the session."""
+    vault = PrefVault()
+    s = AISettings(enabled=True, provider="openrouter", model="openrouter/free",
+                   api_key="sk-or-v1-SECRETVALUE")
+    save_settings(vault, "cms89", s)
+
+    stored = vault.store[settings_key("cms89")].decode("utf-8")
+    assert "SECRETVALUE" not in stored
+    assert "api_key" not in stored
+    assert load_settings(vault, "cms89").api_key == ""
+
+
+def test_no_saved_settings_is_not_an_error():
+    assert load_settings(PrefVault(), "nobody") is None
+
+
+def test_corrupt_saved_settings_fall_back_to_defaults():
+    vault = PrefVault()
+    vault.store[settings_key("cms89")] = b"{not json"
+    assert load_settings(vault, "cms89") is None
+
+
+def test_saved_settings_tolerate_junk_field_types():
+    """A hand-edited or version-skewed file must not crash the sidebar."""
+    import json
+    vault = PrefVault()
+    vault.store[settings_key("u")] = json.dumps({
+        "provider": "anthropic", "target_words": "not-a-number",
+        "verify": "yes", "unknown_field": 1,
+    }).encode("utf-8")
+    s = load_settings(vault, "u")
+    assert s.provider == "anthropic"
+    assert s.target_words == AISettings().target_words   # junk ignored
+    assert s.verify is True

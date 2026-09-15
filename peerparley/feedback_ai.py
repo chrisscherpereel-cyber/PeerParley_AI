@@ -204,6 +204,16 @@ class Point:
             "quote_match": round(self.quote_match, 3),
         }
 
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Point":
+        return cls(
+            point=str(d.get("point", "")),
+            source=str(d.get("source", "")),
+            raised_by=int(d.get("raised_by", 1) or 1),
+            quote_ok=bool(d.get("quote_ok", True)),
+            quote_match=float(d.get("quote_match", 1.0) or 0.0),
+        )
+
 
 @dataclass
 class Flag:
@@ -219,6 +229,15 @@ class Flag:
             "text": self.text, "problem": self.problem,
             "severity": self.severity, "origin": self.origin,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Flag":
+        return cls(
+            text=str(d.get("text", "")),
+            problem=str(d.get("problem", "")),
+            severity=str(d.get("severity", "high")),
+            origin=str(d.get("origin", "verifier")),
+        )
 
 
 @dataclass
@@ -320,6 +339,44 @@ class Draft:
                 "calls": self.usage.calls,
             },
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Draft":
+        """Rebuild a Draft saved to the vault.
+
+        The exact inverse of to_dict, including the instructor's edits and
+        approvals — the whole point of saving is that a session ending does not
+        undo an afternoon of review.
+        """
+        u = d.get("usage") or {}
+        return cls(
+            key=str(d.get("key", "")), name=str(d.get("name", "")),
+            team=str(d.get("team", "")),
+            strengths=str(d.get("strengths", "") or ""),
+            focus=str(d.get("focus", "") or ""),
+            disagreement=str(d.get("disagreement", "") or ""),
+            insufficient_evidence=str(d.get("insufficient_evidence", "") or ""),
+            strength_points=[Point.from_dict(x)
+                             for x in (d.get("strength_points") or [])
+                             if isinstance(x, dict)],
+            focus_points=[Point.from_dict(x)
+                          for x in (d.get("focus_points") or [])
+                          if isinstance(x, dict)],
+            score=float(d.get("score", 1.0) or 0.0),
+            flags=[Flag.from_dict(x) for x in (d.get("flags") or [])
+                   if isinstance(x, dict)],
+            verified=bool(d.get("verified", False)),
+            quotes_checked=bool(d.get("quotes_checked", False)),
+            edited=str(d.get("edited", "") or ""),
+            approved=bool(d.get("approved", False)),
+            model=str(d.get("model", "") or ""),
+            provider=str(d.get("provider", "") or ""),
+            error=str(d.get("error", "") or ""),
+            truncated=bool(d.get("truncated", False)),
+            usage=Usage(int(u.get("input_tokens", 0) or 0),
+                        int(u.get("output_tokens", 0) or 0),
+                        int(u.get("calls", 0) or 0)),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -640,6 +697,115 @@ def verify_draft(client: LLMClient, draft: Draft, src: FeedbackSource) -> None:
 # --------------------------------------------------------------------------- #
 # Batch
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# Persistence
+# --------------------------------------------------------------------------- #
+#
+# Drafts used to live only in st.session_state, which meant signing out — or
+# Streamlit recycling an idle session — threw away an afternoon of review. They
+# are worth keeping: each one cost an API call, and the edits and approvals on
+# top of them cost the instructor's judgement, which is the expensive part.
+#
+# They go to the same encrypted vault as everything else rather than to a local
+# file, because a draft contains a student's name and their teammates' comments
+# about them. Vault.put_bytes Fernet-encrypts before the bytes leave the
+# process, so the storage provider holds ciphertext — the same guarantee the
+# rest of PeerParley makes. Saving is always best-effort: a vault hiccup must
+# never cost the in-memory work it was trying to protect.
+
+DRAFTS_VERSION = 1
+
+
+def drafts_key(slug: str) -> str:
+    """Vault object name for one survey's drafts."""
+    return f"aidrafts__{slug}.json"
+
+
+def drafts_payload(drafts: Dict[str, Draft],
+                   meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {
+        "version": DRAFTS_VERSION,
+        "meta": dict(meta or {}),
+        "drafts": [d.to_dict() for d in (drafts or {}).values()],
+    }
+
+
+def drafts_from_payload(payload: Dict[str, Any]) -> Dict[str, Draft]:
+    out: Dict[str, Draft] = {}
+    for item in (payload or {}).get("drafts") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key", "")).strip()
+        if key:
+            out[key] = Draft.from_dict(item)
+    return out
+
+
+def save_drafts(vault: Any, slug: str, drafts: Dict[str, Draft],
+                meta: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+    """Write drafts to the vault, encrypted. Returns (saved, error message).
+
+    Never raises: the caller is mid-review, and losing the panel to a storage
+    error would be a worse outcome than a stale save.
+    """
+    if not slug:
+        return False, "No survey selected, so there is nowhere to save."
+    try:
+        import json as _json
+        vault.put_bytes(
+            drafts_key(slug),
+            _json.dumps(drafts_payload(drafts, meta), default=str,
+                        ensure_ascii=False).encode("utf-8"),
+        )
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def load_drafts(vault: Any, slug: str) -> Tuple[Dict[str, Draft], str]:
+    """Read drafts back. Returns ({}, "") when none are stored yet.
+
+    A missing object is the normal first-run case and not an error, so it comes
+    back empty rather than noisy. A *corrupt* or undecryptable one does report,
+    because that usually means the Fernet key changed and the instructor needs
+    to know their saved review is unreadable rather than absent.
+    """
+    if not slug:
+        return {}, ""
+    try:
+        raw = vault.get_bytes(drafts_key(slug))
+    except Exception:
+        return {}, ""          # not saved yet
+    try:
+        import json as _json
+        return drafts_from_payload(_json.loads(raw.decode("utf-8"))), ""
+    except Exception as exc:  # noqa: BLE001
+        return {}, f"Saved drafts for this survey could not be read: {exc}"
+
+
+def delete_drafts(vault: Any, slug: str) -> Tuple[bool, str]:
+    try:
+        vault.delete(drafts_key(slug))
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def fingerprint(drafts: Dict[str, Draft]) -> str:
+    """Cheap change detector, so an idle rerun doesn't re-upload the batch.
+
+    Streamlit reruns the script on every widget interaction. Without this, every
+    keystroke in a draft's text box would push the whole set to the vault.
+    """
+    import hashlib
+    parts = []
+    for key in sorted((drafts or {})):
+        d = drafts[key]
+        parts.append(f"{key}|{d.approved}|{d.error}|{len(d.edited)}|"
+                     f"{hash(d.edited)}|{len(d.text())}|{d.score}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
 
 class BatchAborted(RuntimeError):
     """A batch stopped on a failure that would repeat for every remaining student.

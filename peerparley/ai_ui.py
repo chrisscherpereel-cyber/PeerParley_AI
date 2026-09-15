@@ -27,26 +27,208 @@ from .aiconfig import (
     TONES,
     get_provider,
     get_secret,
+    load_settings,
+    save_settings,
 )
 from .grading import TeamResult
-from .llm import estimate_cost, has_pricing
+from .llm import estimate_cost, has_pricing, register_pricing
+from .openrouter_catalog import (
+    ORModel,
+    load_models,
+    pricing_map,
+    vendors as catalog_vendors,
+)
+from . import localmodels
 
 STATE_KEY = "ai_drafts"
 SETTINGS_KEY = "ai_settings"
 
 
 # --------------------------------------------------------------------------- #
+# OpenRouter model catalog
+# --------------------------------------------------------------------------- #
+
+@st.cache_data(ttl=3600, show_spinner="Loading the OpenRouter model list…")
+def _openrouter_catalog(_nonce: int = 0):
+    """The live catalog, refreshed hourly.
+
+    ``_nonce`` is unused by the function — bumping it is how the refresh button
+    busts Streamlit's cache without waiting out the hour.
+    """
+    return load_models()
+
+
+def _openrouter_model_picker(default_slug: str) -> str:
+    """Every model OpenRouter currently carries, A–Z, free ones marked.
+
+    Fetched live rather than hardcoded: OpenRouter's roster turns over weekly,
+    so a baked-in list would offer retired models and hide new ones. Ported from
+    TransQ, which reached the same conclusion for the same reason.
+    """
+    nonce = st.session_state.setdefault("ai_catalog_nonce", 0)
+    catalog, warning = _openrouter_catalog(nonce)
+
+    # Live prices beat the static table, so the cost meter quotes what
+    # OpenRouter charges today.
+    register_pricing(pricing_map(list(catalog)))
+
+    if warning:
+        st.warning(warning, icon="📶")
+
+    free_only = st.checkbox(
+        "Free models only", value=False, key="ai_or_free_only",
+        help="Models OpenRouter serves at $0. They are rate-limited and often "
+             "smaller — fine for trying this out, weaker at holding to the "
+             "'invent nothing' rule, and the weakness is easy to miss because "
+             "the output still reads fluently.",
+    )
+    chosen = st.multiselect(
+        "Filter by vendor", catalog_vendors(list(catalog)), default=[],
+        placeholder="All vendors", key="ai_or_vendors",
+    )
+
+    shown = [
+        m for m in catalog
+        if (not free_only or m.is_free) and (not chosen or m.vendor in chosen)
+    ]
+    if not shown:
+        st.info("No models match those filters.")
+        shown = list(catalog)
+
+    slugs = [m.id for m in shown]
+    labels = {m.id: m.option_label for m in shown}
+    index = slugs.index(default_slug) if default_slug in slugs else 0
+
+    free_count = sum(1 for m in catalog if m.is_free)
+    st.caption(
+        f"{len(shown)} of {len(catalog)} models · {free_count} free · "
+        f"{'bundled snapshot' if warning else 'live from openrouter.ai'}"
+    )
+
+    selected = st.selectbox(
+        "Model", slugs, index=index,
+        format_func=lambda slug: labels.get(slug, slug),
+        key="ai_or_model",
+        help="Type to search. Sorted alphabetically; 🆓 marks models priced at $0.",
+    )
+
+    c1, c2 = st.columns(2)
+    if c1.button("↻ Refresh list", use_container_width=True, key="ai_or_refresh"):
+        st.session_state["ai_catalog_nonce"] = nonce + 1
+        _openrouter_catalog.clear()
+        st.rerun()
+    custom = c2.text_input(
+        "Or a slug", value="", placeholder="vendor/model", key="ai_or_custom",
+        help="Anything not in the list — a brand-new model, or a variant.",
+    ).strip()
+
+    return custom or selected
+
+
+# --------------------------------------------------------------------------- #
+# Local model picker
+# --------------------------------------------------------------------------- #
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _probe_local(base_url: str, _nonce: int = 0) -> Dict[str, Any]:
+    server = localmodels.probe(base_url)
+    return {"usable": server.is_usable, "models": list(server.models),
+            "status": server.status, "label": server.label}
+
+
+def _local_model_picker(current_url: str, saved_model: str) -> tuple:
+    """(server address, model) — the model list read from the machine itself.
+
+    Never hardcoded: what is offered is what is actually installed, which is the
+    only list that can be right.
+    """
+    if localmodels.is_hosted():
+        # Not a setup problem with a fix; it is the definition of "local". The
+        # memory figure and the "install Ollama" advice would both be answering
+        # a question the instructor is not in a position to ask from here.
+        st.warning(
+            "**This app is running on Streamlit's servers, so it cannot reach a "
+            "model on your computer.** `localhost` here means Streamlit's own "
+            "machine, not yours. No address will bridge that — it is what "
+            "\"local\" means.",
+            icon="🌐",
+        )
+        st.caption(
+            "To use a local model, run PeerParley on your own computer. Your "
+            "hosted app keeps working exactly as it does now. In the meantime a "
+            "hosted provider is the workable option here."
+        )
+        return current_url, saved_model
+
+    base_url = st.text_input(
+        "Server address", value=current_url or localmodels.DEFAULT_BASE_URL,
+        key="ai_local_url",
+        help="Ollama listens on port 11434, LM Studio on 1234. A bare host or "
+             "a missing /v1 is fine — it gets tidied up.",
+    )
+    base_url = localmodels.normalise(base_url)
+
+    nonce = st.session_state.setdefault("ai_local_nonce", 0)
+    left, right = st.columns([1, 1])
+    if left.button("Check again", use_container_width=True, key="ai_local_recheck"):
+        st.session_state["ai_local_nonce"] = nonce + 1
+        _probe_local.clear()
+        st.rerun()
+    mem = localmodels.available_memory_gb()
+    if mem:
+        right.caption(localmodels.guidance(mem))
+
+    server = _probe_local(base_url, nonce)
+
+    if not server["usable"]:
+        st.error(server["status"], icon="🔌")
+        st.caption(
+            "Install Ollama from [ollama.com/download](https://ollama.com/download), "
+            "then run `ollama pull qwen2.5:14b` in a terminal."
+        )
+        # Hand back the address anyway: it is worth keeping so it is not
+        # retyped once the server is running.
+        return base_url, saved_model
+
+    st.success(server["status"], icon="✅")
+    options = list(server["models"])
+    if not options:
+        st.warning("That server is running but has no models downloaded yet.",
+                   icon="📦")
+        return base_url, saved_model
+    index = options.index(saved_model) if saved_model in options else 0
+    model = st.selectbox("Model", options, index=index, key="ai_local_model")
+    st.caption(
+        "Runs entirely on this machine. No student comment leaves the room, "
+        "and there is no per-section cost."
+    )
+    return base_url, model
+
+
+# --------------------------------------------------------------------------- #
 # Sidebar
 # --------------------------------------------------------------------------- #
 
-def sidebar_settings() -> AISettings:
+PREFS_LOADED_KEY = "ai_settings_loaded_for"
+
+
+def sidebar_settings(vault=None, username: str = "") -> AISettings:
     """Render the AI panel in the sidebar and return the chosen settings.
 
     Returns a disabled AISettings when the instructor hasn't switched the
     feature on, so every call site can treat "off" and "not configured" the
     same way.
     """
-    s: AISettings = st.session_state.get(SETTINGS_KEY) or AISettings()
+    s: Optional[AISettings] = st.session_state.get(SETTINGS_KEY)
+
+    # First render of a session: adopt whatever this instructor saved last time,
+    # so the provider and model do not have to be re-picked on every sign-in.
+    if s is None and vault is not None and st.session_state.get(
+            PREFS_LOADED_KEY) != username:
+        st.session_state[PREFS_LOADED_KEY] = username
+        s = load_settings(vault, username)
+    if s is None:
+        s = AISettings()
 
     st.divider()
     st.markdown("### 🤖 AI feedback writer")
@@ -73,8 +255,18 @@ def sidebar_settings() -> AISettings:
         st.caption(spec.note)
 
     # ---- model -----------------------------------------------------------
-    models = list(spec.models)
-    if models:
+    # Three shapes, because the providers genuinely differ: OpenRouter has
+    # hundreds of models that change weekly and must be fetched; a local server
+    # has whatever happens to be installed on that machine; the rest have a
+    # short, stable roster that fits in a dropdown.
+    if s.provider == "openrouter":
+        seed = s.model if s.model else (spec.models[0] if spec.models else "")
+        s.model = _openrouter_model_picker(seed)
+    elif spec.is_local:
+        s.local_base_url, s.model = _local_model_picker(
+            s.local_base_url, s.model if s.provider == "local" else "")
+    else:
+        models = list(spec.models)
         default_model = s.model if s.model in models else models[0]
         s.model = st.selectbox(
             "Model", models, index=models.index(default_model),
@@ -89,23 +281,6 @@ def sidebar_settings() -> AISettings:
             ).strip()
             if custom:
                 s.model = custom
-    else:
-        s.model = st.text_input(
-            "Model name", value=s.model if s.provider == "local" else "",
-            key="ai_model_local", placeholder="llama3.1:8b",
-            help="Whatever `ollama list` (or LM Studio) shows on this machine.",
-        ).strip()
-
-    if spec.is_local:
-        s.local_base_url = st.text_input(
-            "Server address", value=s.local_base_url, key="ai_local_url",
-            help="Ollama defaults to port 11434; LM Studio to 1234.",
-        ).strip() or s.local_base_url
-        st.warning(
-            "A local model is only reachable when PeerParley runs on that same "
-            "machine. A Streamlit Cloud deployment cannot see your laptop.",
-            icon="⚠️",
-        )
 
     # ---- key -------------------------------------------------------------
     if spec.requires_key:
@@ -174,6 +349,19 @@ def sidebar_settings() -> AISettings:
                 help="Drafts under this score are held out of 'approve all' and "
                      "marked for a read.",
             )
+
+    # ---- remember these choices -----------------------------------------
+    if vault is not None:
+        if st.button("💾 Remember these settings", key="ai_save_prefs",
+                     use_container_width=True,
+                     help="Saves the provider, model, tone and grounding "
+                          "options to your account. Your API key is never "
+                          "saved — it stays in this session only."):
+            ok, err = save_settings(vault, username, s)
+            if ok:
+                st.success("Saved. These will be selected next time you sign in.")
+            else:
+                st.warning(f"Could not save settings: {err}")
 
     # ---- live meter ------------------------------------------------------
     drafts: Dict[str, fai.Draft] = st.session_state.get(STATE_KEY) or {}
@@ -275,15 +463,72 @@ def _points_table(draft: fai.Draft) -> None:
         st.caption("The model recorded no sourced points for this draft.")
 
 
+FP_KEY = "ai_drafts_fingerprint"
+LOADED_KEY = "ai_drafts_loaded_for"
+
+
+def _persist(vault, slug: str, drafts: Dict[str, fai.Draft],
+             settings: AISettings, force: bool = False) -> None:
+    """Save to the vault when something actually changed.
+
+    Guarded by a fingerprint because Streamlit reruns on every keystroke, and
+    re-uploading forty drafts per character would make the panel unusable.
+    """
+    if vault is None or not slug:
+        return
+    fp = fai.fingerprint(drafts)
+    if not force and st.session_state.get(FP_KEY) == fp:
+        return
+    saved, err = fai.save_drafts(vault, slug, drafts, meta={
+        "provider": settings.provider, "model": settings.model,
+        "tone": settings.tone, "verify": settings.verify,
+    })
+    if saved:
+        st.session_state[FP_KEY] = fp
+    else:
+        # Say it once, plainly. The work is still in memory, so this is a
+        # warning about durability rather than a lost-data error.
+        st.warning(
+            f"Drafts could not be saved to the vault, so they will not survive "
+            f"signing out: {err}", icon="⚠️",
+        )
+
+
+def _restore(vault, slug: str) -> Dict[str, fai.Draft]:
+    """Pull saved drafts back in, once per survey per session."""
+    drafts: Dict[str, fai.Draft] = st.session_state.get(STATE_KEY) or {}
+    if vault is None or not slug or st.session_state.get(LOADED_KEY) == slug:
+        return drafts
+    st.session_state[LOADED_KEY] = slug
+    if drafts:
+        return drafts                      # this session already has newer work
+    restored, err = fai.load_drafts(vault, slug)
+    if err:
+        st.warning(err, icon="⚠️")
+    if restored:
+        st.session_state[STATE_KEY] = restored
+        st.session_state[FP_KEY] = fai.fingerprint(restored)
+        stats = fai.batch_stats(restored)
+        st.info(
+            f"Restored {stats['written']} saved narrative(s) for this survey "
+            f"({stats['approved']} already approved). Your edits and approvals "
+            "were kept.", icon="💾",
+        )
+    return restored
+
+
 def render_review_panel(teams: List[TeamResult], settings: AISettings,
-                        course: str = "", eval_no: str = "") -> Dict[str, str]:
+                        course: str = "", eval_no: str = "",
+                        vault=None, slug: str = "") -> Dict[str, str]:
     """The AI review workflow. Returns {student key: approved narrative}.
 
     Called from the Results tab. The returned map is what the PDF and email
     paths use, so a draft that isn't approved here simply doesn't exist
     downstream.
     """
-    drafts: Dict[str, fai.Draft] = st.session_state.setdefault(STATE_KEY, {})
+    st.session_state.setdefault(STATE_KEY, {})
+    drafts: Dict[str, fai.Draft] = _restore(vault, slug)
+    st.session_state[STATE_KEY] = drafts
     members = [m for t in teams for m in t.members]
 
     if not settings.enabled:
@@ -304,17 +549,34 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
     missing = [m.key for m in members if m.key not in drafts]
     failed = [k for k, d in drafts.items() if not d.ok]
 
-    g1, g2, g3 = st.columns([1.2, 1.2, 2])
-    run_all = g1.button(
-        f"✨ Draft feedback for all {len(members)}", key="ai_gen_all",
-        type="primary" if not drafts else "secondary",
-        help="Regenerates every student, replacing existing drafts. Approvals "
-             "and edits for those students are cleared.",
+    todo = missing + failed
+    done = [k for k, d in drafts.items() if d.ok and d.text().strip()]
+
+    g1, g2, g3 = st.columns([1.5, 1.3, 2])
+    # The retry is the primary action once anything exists, because it is the
+    # one that cannot destroy finished work. "Draft all" is the destructive
+    # path and should not be the button that looks like the default.
+    if todo:
+        rest_label = (f"↻ Draft only the {len(todo)} not yet done"
+                      if done else f"↻ Draft the {len(todo)} remaining")
+    else:
+        rest_label = "↻ Nothing left to draft"
+    run_rest = g1.button(
+        rest_label, key="ai_gen_rest", disabled=not todo,
+        type="primary" if todo and done else "secondary",
+        help=(f"{len(missing)} never drafted + {len(failed)} that failed. "
+              f"Leaves the {len(done)} finished draft(s) — and your edits and "
+              "approvals on them — untouched." if todo else
+              "Every student already has a draft."),
     )
-    run_rest = g2.button(
-        f"Draft the {len(missing) + len(failed)} remaining", key="ai_gen_rest",
-        disabled=not (missing or failed),
-        help="Only students with no draft yet, plus any that errored.",
+    run_all = g2.button(
+        f"Redo all {len(members)}", key="ai_gen_all",
+        type="primary" if not drafts else "secondary",
+        help=("Regenerates every student from scratch, discarding all "
+              f"{len(done)} finished draft(s) along with every edit and "
+              "approval on them. Use the retry button instead unless you want "
+              "to start over." if done else
+              "Drafts a narrative for every student."),
     )
     with g3:
         st.caption(
@@ -322,6 +584,9 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
             f"{'with' if settings.verify else 'without'} the grounding audit · "
             f"{'1' if not settings.verify else '2'} call(s) per student"
         )
+        if done and todo:
+            st.caption(f"**{len(done)} done, {len(todo)} to go.** The retry "
+                       "button only touches the ones still outstanding.")
 
     targets: Optional[List[str]] = None
     if run_all:
@@ -360,6 +625,7 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
             )
             drafts.update(fresh)
             st.session_state[STATE_KEY] = drafts
+            _persist(vault, slug, drafts, settings)
             return fai.approved_narratives(drafts)
 
         drafts.update(fresh)
@@ -373,9 +639,20 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         # Not a success when nothing was written. Saying "Drafted 40" over forty
         # failures is how an instructor ends up believing the run worked.
         if stats["written"]:
-            st.success(line)
+            st.session_state["ai_last_batch"] = ("success", line)
         else:
-            st.error(line + "  No narratives were produced — see below.")
+            st.session_state["ai_last_batch"] = (
+                "error", line + "  No narratives were produced — see below.")
+        _persist(vault, slug, drafts, settings, force=True)
+        # Rerun so the button labels and counts above are recomputed from the
+        # new state. Without this they still show the pre-batch numbers — which
+        # is how "Draft the 40 remaining" ended up sitting next to "38 failed".
+        st.rerun()
+
+    # Carried across the rerun above.
+    _last = st.session_state.pop("ai_last_batch", None)
+    if _last:
+        (st.success if _last[0] == "success" else st.error)(_last[1])
 
     if not drafts:
         st.info(
@@ -528,4 +805,6 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                         st.caption(f"Grounding score: {d.score:.0%}")
 
     st.session_state[STATE_KEY] = drafts
+    # Edits and approvals made on this run are worth as much as the drafts.
+    _persist(vault, slug, drafts, settings)
     return fai.approved_narratives(drafts)

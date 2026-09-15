@@ -171,7 +171,11 @@ with st.sidebar:
                    # survey switch would attach one cohort's narratives to
                    # another cohort's students — the same leak the guard above
                    # exists to prevent, with worse consequences.
-                   ai_ui.STATE_KEY, "ai_narratives"):
+                   ai_ui.STATE_KEY, "ai_narratives",
+                   # Reset the persistence bookkeeping too, so the new survey's
+                   # saved drafts are restored rather than the old survey's
+                   # fingerprint suppressing the load.
+                   ai_ui.FP_KEY, ai_ui.LOADED_KEY):
             S.pop(_k, None)
         S["_nav_token"] = S.get("_nav_token", 0) + 1
     S["_active_slug"] = _active_slug
@@ -221,7 +225,8 @@ with st.sidebar:
     # storage → survey → admin. Returns a disabled settings object when the
     # instructor has not switched it on, so every call site downstream can treat
     # "off" and "not configured" identically.
-    ai_settings = ai_ui.sidebar_settings()
+    ai_settings = ai_ui.sidebar_settings(
+        vault=Vault(), username=str(user.get("user") or "default"))
 
 DEFAULT_INVITE_BODY = (
     "Hi {first_name},<br><br>"
@@ -973,7 +978,9 @@ with tabs[3]:
             # whatever is approved here, so the review has to happen first for
             # the buttons underneath to include it.
             st.markdown("##### AI feedback narrative (optional)")
-            narratives = ai_ui.render_review_panel(teams, ai_settings, course, eval_no)
+            narratives = ai_ui.render_review_panel(
+                teams, ai_settings, course, eval_no,
+                vault=Vault(), slug=survey.slugify(course, eval_no))
             # Tab 5 builds its own PDFs for the email attachments and needs the
             # same approvals. Streamlit renders tabs in order within one run, so
             # this is always set before tab 5 reads it; it is kept in session
