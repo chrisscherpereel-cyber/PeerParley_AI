@@ -266,6 +266,18 @@ remaining** after fixing.
 
 ## Your work is saved
 
+**The whole session, not just the drafts.** The responses, the self-evaluations,
+the roster and the course name autosave to the encrypted vault as you work. Sign
+back in and the sidebar offers **↩ Resume it**, naming what it would bring
+back. Resuming restores the course name too — which is what reconnects the
+drafts, because they're filed under it.
+
+If the panel says there are no drafts for this survey but some exist for
+others, it lists those. Drafts are filed by course and evaluation number, so
+reaching one means setting the course box to match, or resuming that session.
+
+### Drafts specifically
+
 Drafts, your edits, and your approvals are written to the encrypted vault as you
 go, keyed to the survey you're working on. Sign out, come back tomorrow, open
 the Results tab, and the panel restores what you'd done — it says so when it
@@ -313,7 +325,8 @@ grading changes either way.
 | `peerparley/ai_ui.py` | Sidebar settings, model pickers, and the review panel |
 | `peerparley/openrouter_catalog.py` | The live OpenRouter catalog (ported from TransQ) |
 | `peerparley/localmodels.py` | Local server probing and model discovery (ported from TransQ) |
-| `tests/test_feedback_ai.py` | 84 offline tests; no API key needed |
+| `peerparley/workspace.py` | Session autosave and the complete `.ppx` bundle format |
+| `tests/test_feedback_ai.py` | 95 offline tests; no API key needed |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to

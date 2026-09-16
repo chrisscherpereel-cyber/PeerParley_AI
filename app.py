@@ -39,10 +39,10 @@ from peerparley import ingest
 from peerparley import survey
 from peerparley import emailpack
 from peerparley import ai_ui
+from peerparley import workspace
 from peerparley.grading import GradeSettings, compute, results_to_frame
 from peerparley import pdfgen
 from peerparley import email_delivery as mail
-from peerparley.security import encrypt_dataframe, decrypt_dataframe
 from peerparley.vault import Vault
 from peerparley.ui_helpers import (
     render_pdf as _render_pdf,
@@ -140,6 +140,50 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### Working on")
+
+    # ---- Resume an earlier session --------------------------------------
+    # The responses, the self-evaluations and the roster all used to live in
+    # session state alone, so signing out discarded an evening's work — and
+    # because the AI drafts are keyed by the course name, losing the course box
+    # made the saved drafts unreachable too. Restoring the workspace as a unit
+    # brings the course name back with it, which is what reconnects them.
+    _uname = str(user.get("user") or "default")
+    if "_ws_checked" not in S:
+        S["_ws_checked"] = True
+        _st, _err = workspace.load(Vault(), _uname)
+        S["_ws_saved"] = _st
+        if _err:
+            st.warning(_err, icon="⚠️")
+    _saved = S.get("_ws_saved")
+    if _saved and "long_df" not in S:
+        st.info("**Earlier session found**\n\n" + workspace.describe(_saved),
+                icon="💾")
+        r1, r2 = st.columns([1.4, 1])
+        if r1.button("↩ Resume it", type="primary", use_container_width=True,
+                     key="ws_resume"):
+            S["long_df"] = _saved["long_df"]
+            S["self_evals"] = _saved["self_evals"]
+            S["roster"] = _saved["roster"]
+            # Written to the widget keys, not just to S, so the text boxes below
+            # actually show the course again — that is what rebuilds the slug
+            # the AI drafts were saved under.
+            S["new_course"] = _saved["course"]
+            S["new_eval"] = _saved["eval_no"] or "1"
+            # Resuming moves the course box, which moves the slug. The
+            # cross-survey guard further down reads that as a survey switch and
+            # would wipe the data just restored, so the slug is pre-set here to
+            # the one being resumed into: a resume is not a switch.
+            S["_active_slug"] = survey.slugify(
+                _saved["course"], _saved["eval_no"] or "1")
+            S["_ws_resumed"] = True
+            st.rerun()
+        if r2.button("Discard", use_container_width=True, key="ws_discard"):
+            workspace.clear(Vault(), _uname)
+            S["_ws_saved"] = None
+            st.rerun()
+    elif S.pop("_ws_resumed", False):
+        st.success("Session resumed.", icon="↩")
+
     _all = survey.list_surveys()
     _mine = survey.visible_surveys(_all, user)
     _labels = [f"{(s['course'] or '(no course)')} · Eval {s['eval_no']}"
@@ -1170,13 +1214,25 @@ with tabs[6]:
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M")
         default_key = f"{(course or 'section').replace(' ', '')}_eval{eval_no}_{stamp}.ppx"
         key = st.text_input("Bundle name", default_key)
+        st.caption("A bundle now holds the responses **and** the self-evaluations, "
+                   "the roster, the course name, and any AI drafts with your "
+                   "approvals — everything needed to pick up where you left off. "
+                   "Older bundles held the responses only; they still load.")
         if st.button("🔒 Encrypt & save to vault"):
             if "long_df" not in S:
                 st.warning("Nothing to save yet.")
             else:
                 try:
-                    vault.put_bytes(key, encrypt_dataframe(S["long_df"]))
-                    st.success(f"Saved encrypted bundle `{key}` to {cfg.vault.backend}.")
+                    _drafts = {
+                        k: d.to_dict()
+                        for k, d in (S.get(ai_ui.STATE_KEY) or {}).items()
+                    }
+                    vault.put_bytes(key, workspace.bundle_bytes(
+                        S["long_df"], S.get("self_evals"), S.get("roster"),
+                        course, eval_no, _drafts))
+                    _extra = (f" · {len(_drafts)} AI draft(s)" if _drafts else "")
+                    st.success(f"Saved `{key}` to {cfg.vault.backend} — "
+                               f"{len(S['long_df'])} rows{_extra}.")
                 except Exception as exc:
                     st.error(f"Save failed: {exc}")
     with c2:
@@ -1189,10 +1245,38 @@ with tabs[6]:
         pick = st.selectbox("Bundle", items) if items else None
         if pick and st.button("🔓 Load & decrypt"):
             try:
-                df = decrypt_dataframe(vault.get_bytes(pick))
-                S["long_df"] = df
-                st.success(f"Loaded `{pick}` ({len(df)} rows). Open **④ Results & reports** "
-                           "to recompute.")
+                state, note = workspace.read_bundle(vault.get_bytes(pick))
+                S["long_df"] = state["long_df"]
+                if state.get("self_evals"):
+                    S["self_evals"] = state["self_evals"]
+                if state.get("roster") is not None:
+                    S["roster"] = state["roster"]
+                if state.get("course"):
+                    # Restoring the course name is what reconnects the AI drafts,
+                    # which are keyed by it. Set on the widget keys and pre-set
+                    # the slug so the cross-survey guard doesn't read the change
+                    # as a switch and wipe what was just loaded.
+                    S["new_course"] = state["course"]
+                    S["new_eval"] = state.get("eval_no") or "1"
+                    S["_active_slug"] = survey.slugify(
+                        state["course"], state.get("eval_no") or "1")
+                if state.get("drafts"):
+                    from peerparley import feedback_ai as _fai
+                    S[ai_ui.STATE_KEY] = {
+                        k: _fai.Draft.from_dict(v)
+                        for k, v in state["drafts"].items()
+                    }
+                    S.pop(ai_ui.FP_KEY, None)
+                _bits = [f"{len(state['long_df'])} rows"]
+                if state.get("self_evals"):
+                    _bits.append(f"{len(state['self_evals'])} self-evals")
+                if state.get("drafts"):
+                    _bits.append(f"{len(state['drafts'])} AI draft(s)")
+                st.success(f"Loaded `{pick}` — " + " · ".join(_bits)
+                           + ". Open **④ Results & reports**.")
+                if note:
+                    st.info(note, icon="ℹ️")
+                st.rerun()
             except Exception as exc:
                 st.error(f"Load failed: {exc}")
 
@@ -1203,3 +1287,34 @@ with tabs[6]:
         if dele != "(choose)" and st.button("Delete permanently"):
             vault.delete(dele)
             st.warning(f"Deleted `{dele}`.")
+
+
+# =========================================================================== #
+# Autosave the working dataset
+# =========================================================================== #
+# Runs last, after every tab has had its chance to change things. Guarded by a
+# fingerprint so an idle rerun does not re-upload the frame, and wrapped so a
+# storage failure can never take down a page the instructor is working in — a
+# best-effort autosave that crashes the app would be worse than none.
+#
+# This is what makes the sidebar's "Resume it" possible: the responses, the
+# self-evaluations, the roster and the course name are saved together, and the
+# course name is what rebuilds the slug the AI drafts live under.
+if "long_df" in S:
+    _ws_fp = workspace.fingerprint(S.get("long_df"), course, eval_no)
+    if _ws_fp and S.get("_ws_fingerprint") != _ws_fp:
+        _ws_ok, _ws_err = workspace.save(
+            Vault(), str(user.get("user") or "default"),
+            long_df=S.get("long_df"), self_evals=S.get("self_evals"),
+            roster=S.get("roster"), course=course, eval_no=eval_no,
+        )
+        if _ws_ok:
+            S["_ws_fingerprint"] = _ws_fp
+            S["_ws_saved"] = None          # the live session is now the truth
+        elif not S.get("_ws_warned"):
+            # Once per session. Repeating it on every rerun would train the
+            # instructor to ignore it.
+            S["_ws_warned"] = True
+            st.sidebar.warning(
+                f"Could not autosave this session, so it will not survive "
+                f"signing out: {_ws_err}", icon="⚠️")

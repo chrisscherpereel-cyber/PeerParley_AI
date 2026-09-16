@@ -654,6 +654,30 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
     if _last:
         (st.success if _last[0] == "success" else st.error)(_last[1])
 
+    # Drafts are keyed by survey slug, and a slug is built from the course box.
+    # If that box is empty or holds a different course, saved drafts exist but
+    # are not addressed — which is exactly how an afternoon's work came to look
+    # lost. So say what is in the vault rather than leaving it invisible.
+    if not drafts and vault is not None:
+        try:
+            others = sorted(
+                k for k in vault.list()
+                if k.startswith("aidrafts__") and k != fai.drafts_key(slug)
+            )
+        except Exception:  # noqa: BLE001
+            others = []
+        if others:
+            with st.expander(f"💾 Saved drafts exist for {len(others)} other "
+                             "survey(s) — not this one", expanded=True):
+                st.caption(
+                    "Drafts are filed under the course and evaluation number "
+                    "they were written for. To reach one of these, set the "
+                    "course box in the sidebar to match, or resume that session."
+                )
+                for name in others:
+                    label = name[len("aidrafts__"):-len(".json")]
+                    st.markdown(f"- `{label}`")
+
     if not drafts:
         st.info(
             "No drafts yet. Generating costs one or two API calls per student "

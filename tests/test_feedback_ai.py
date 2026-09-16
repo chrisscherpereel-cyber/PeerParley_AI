@@ -1202,3 +1202,192 @@ def test_saved_settings_tolerate_junk_field_types():
     assert s.provider == "anthropic"
     assert s.target_words == AISettings().target_words   # junk ignored
     assert s.verify is True
+
+
+# --------------------------------------------------------------------------- #
+# Workspace autosave — the real answer to "my info was gone"
+# (a live run lost an uploaded survey plus its AI output on sign-out)
+# --------------------------------------------------------------------------- #
+
+import pandas as pd  # noqa: E402
+
+from peerparley import workspace as ws  # noqa: E402
+from peerparley.ingest import Roster  # noqa: E402
+from peerparley import survey as sv  # noqa: E402
+
+
+def _working_set():
+    df = pd.DataFrame([
+        {"evaluator": "Ann Lee", "evaluator_key": "ann lee",
+         "evaluator_team": "1", "evaluatee": "Bob Kim",
+         "evaluatee_key": "bob kim", "points": 60.0,
+         "public_comment": "Bob rebuilt the deck",
+         "contribution_text": "Rebuilt the deck",
+         "improve_text": "Went quiet in week 3",
+         "confidential_comment": "instructor only", "rank": 1.0,
+         "r0": 4.0, "r1": 4.0, "r2": 3.0, "r3": 4.0},
+        {"evaluator": "Bob Kim", "evaluator_key": "bob kim",
+         "evaluator_team": "1", "evaluatee": "Ann Lee",
+         "evaluatee_key": "ann lee", "points": 40.0,
+         "public_comment": "Ann led the analysis",
+         "contribution_text": "Led the analysis",
+         "improve_text": "Late updates", "confidential_comment": "",
+         "rank": 2.0, "r0": 3.0, "r1": 3.0, "r2": 4.0, "r3": 3.0},
+    ])
+    self_evals = {
+        ("1", "ann lee"): {"ratings": [3, 3, 3, 3], "rank": 1.0,
+                           "self_contribution": "I led the analysis"},
+        ("1", "bob kim"): {"ratings": [4, 4, 4, 4], "rank": 2.0,
+                           "self_contribution": "I did the deck"},
+    }
+    roster = Roster()
+    roster.by_key = {
+        "ann lee": {"name": "Ann Lee", "first": "Ann", "last": "Lee",
+                    "email": "ann@nau.edu", "team": "1"},
+        "bob kim": {"name": "Bob Kim", "first": "Bob", "last": "Kim",
+                    "email": "bob@nau.edu", "team": "1"},
+    }
+    return df, self_evals, roster
+
+
+def test_the_whole_working_set_survives_a_logout():
+    """Responses, self-evals, roster AND the course name — not just the frame."""
+    vault = MemoryVault()
+    df, self_evals, roster = _working_set()
+
+    ok, err = ws.save(vault, "cms89", long_df=df, self_evals=self_evals,
+                      roster=roster, course="Testing2", eval_no="1")
+    assert ok, err
+
+    state, err = ws.load(vault, "cms89")
+    assert err == ""
+    assert len(state["long_df"]) == 2
+    assert list(state["long_df"].columns) == list(df.columns)
+    assert state["course"] == "Testing2" and state["eval_no"] == "1"
+    # The two things the old .ppx bundle silently dropped:
+    assert state["self_evals"][("1", "ann lee")]["self_contribution"] == \
+        "I led the analysis"
+    assert state["roster"].match("Bob Kim")["email"] == "bob@nau.edu"
+
+
+def test_restoring_the_course_name_reconnects_the_drafts():
+    """The actual bug: drafts were in the vault under a key nobody asked for.
+
+    They were saved under the slug for "Testing2", then looked for under the
+    slug for "" because the course box resets on sign-in.
+    """
+    vault = MemoryVault()
+    df, self_evals, roster = _working_set()
+    ws.save(vault, "cms89", long_df=df, self_evals=self_evals, roster=roster,
+            course="Testing2", eval_no="1")
+
+    written_under = fai.drafts_key(sv.slugify("Testing2", "1"))
+    looked_for_before = fai.drafts_key(sv.slugify("", "1"))
+    assert written_under != looked_for_before        # the old failure
+
+    state, _ = ws.load(vault, "cms89")
+    looked_for_after = fai.drafts_key(
+        sv.slugify(state["course"], state["eval_no"]))
+    assert looked_for_after == written_under         # the fix
+
+
+def test_self_eval_keys_round_trip_without_cross_contamination():
+    """A separator that could appear in a team name would mis-file a self-rating."""
+    tricky = {
+        ("Team A|1", "o'brien, sean"): {"ratings": [1, 2, 3, 4], "rank": 1.0},
+        ("1", "van der berg"): {"ratings": [4, 3, 2, 1], "rank": 2.0},
+    }
+    back = ws._decode_self_evals(ws._encode_self_evals(tricky))
+    assert back == tricky
+
+
+def test_autosave_is_skipped_when_there_is_nothing_loaded():
+    ok, err = ws.save(MemoryVault(), "u", long_df=None)
+    assert not ok and "nothing to autosave" in err
+    ok, err = ws.save(MemoryVault(), "u", long_df=pd.DataFrame())
+    assert not ok
+
+
+def test_nothing_saved_is_silent_but_a_broken_save_speaks_up():
+    assert ws.load(MemoryVault(), "nobody") == (None, "")
+
+    vault = MemoryVault()
+    vault.store[ws.workspace_key("u")] = b"{not json"
+    state, err = ws.load(vault, "u")
+    assert state is None and "could not be read" in err
+
+
+def test_workspace_fingerprint_tracks_content_not_just_shape():
+    df, _, _ = _working_set()
+    fp = ws.fingerprint(df, "Testing2", "1")
+    assert ws.fingerprint(df, "Testing2", "1") == fp
+    assert ws.fingerprint(df, "OtherCourse", "1") != fp     # course matters
+    assert ws.fingerprint(df, "Testing2", "2") != fp        # eval no matters
+
+    edited = df.copy()
+    edited.loc[0, "public_comment"] = "a different comment"
+    assert ws.fingerprint(edited, "Testing2", "1") != fp    # content matters
+
+
+def test_workspace_is_per_instructor():
+    vault = MemoryVault()
+    df, se, r = _working_set()
+    ws.save(vault, "cms89", long_df=df, self_evals=se, roster=r, course="A", eval_no="1")
+    ws.save(vault, "little", long_df=df.head(1), self_evals={}, roster=None,
+            course="B", eval_no="2")
+    assert ws.load(vault, "cms89")[0]["course"] == "A"
+    assert ws.load(vault, "little")[0]["course"] == "B"
+    assert ws.workspace_key("cms89") != ws.workspace_key("little")
+
+
+def test_clear_removes_both_objects():
+    vault = MemoryVault()
+    df, se, r = _working_set()
+    ws.save(vault, "u", long_df=df, self_evals=se, roster=r, course="A", eval_no="1")
+    assert len(vault.store) == 2
+    ws.clear(vault, "u")
+    assert ws.load(vault, "u") == (None, "")
+
+
+# ---- named .ppx bundles ---------------------------------------------------- #
+
+def test_a_bundle_now_carries_everything_including_drafts():
+    """The complaint: "the vault does not contain all the information"."""
+    df, self_evals, roster = _working_set()
+    drafts = {k: d.to_dict() for k, d in _reviewed_batch().items()}
+
+    state, note = ws.read_bundle(
+        ws.bundle_bytes(df, self_evals, roster, "Testing2", "1", drafts))
+
+    assert note == ""
+    assert len(state["long_df"]) == 2
+    assert state["course"] == "Testing2" and state["eval_no"] == "1"
+    assert state["self_evals"][("1", "bob kim")]["rank"] == 2.0
+    assert state["roster"].match("Ann Lee")["email"] == "ann@nau.edu"
+    assert set(state["drafts"]) == {"a", "b", "c"}
+    assert state["drafts"]["a"]["approved"] is True
+    assert not state["legacy"]
+
+
+def test_bundle_drafts_rebuild_into_real_drafts_with_approvals_intact():
+    df, se, r = _working_set()
+    drafts = {k: d.to_dict() for k, d in _reviewed_batch().items()}
+    state, _ = ws.read_bundle(ws.bundle_bytes(df, se, r, "T", "1", drafts))
+
+    rebuilt = {k: fai.Draft.from_dict(v) for k, v in state["drafts"].items()}
+    assert set(fai.approved_narratives(rebuilt)) == {"a"}
+    assert rebuilt["a"].text() == "The instructor's own wording, kept verbatim."
+
+
+def test_old_bundles_still_load_and_say_what_is_missing():
+    """A file written last semester is exactly when compatibility matters."""
+    import io as _io
+    df, _, _ = _working_set()
+    buf = _io.BytesIO()
+    df.to_parquet(buf, index=False)          # what a legacy .ppx decrypts to
+
+    state, note = ws.read_bundle(buf.getvalue())
+    assert state["legacy"] is True
+    assert len(state["long_df"]) == 2
+    assert state["self_evals"] == {} and state["drafts"] == {}
+    assert "responses only" in note          # and it says so rather than pretending

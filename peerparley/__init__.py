@@ -10,4 +10,4 @@ narrative grounded in those comments and nothing else, with an instructor
 approval gate in front of anything a student sees.
 """
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"

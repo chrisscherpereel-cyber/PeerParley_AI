@@ -387,6 +387,57 @@ check("retry targets exclude finished drafts", target.key not in (_missing + _fa
 check("retry targets include the failed one", "broken" in _failed)
 check("finished work is counted as done", _done == [target.key])
 
+# --------------------------------------------------------------------------- #
+# The whole working set survives a sign-out, course name included
+# --------------------------------------------------------------------------- #
+from peerparley import survey  # noqa: E402
+from peerparley import workspace as pws  # noqa: E402
+
+wv = _MemVault()
+wv.delete = lambda n: wv.store.pop(n, None)
+ok_ws, ws_err = pws.save(wv, "cms89", long_df=long_df,
+                         self_evals=ss(at, "self_evals"),
+                         roster=ss(at, "roster"), course="Testing2", eval_no="1")
+check("the working set autosaves", ok_ws)
+
+restored, rerr = pws.load(wv, "cms89")
+check("it loads back after a sign-out", rerr == "" and restored is not None)
+check("the responses come back", len(restored["long_df"]) == len(long_df))
+check("the self-evaluations come back (the .ppx used to drop these)",
+      len(restored["self_evals"]) == len(ss(at, "self_evals") or {}))
+check("the roster comes back (so email still works)",
+      restored["roster"].match("Ann Lee") is not None)
+check("the course name comes back", restored["course"] == "Testing2")
+
+# The actual bug: drafts were filed under the course slug, and the course box
+# resets on sign-in, so the app looked under the wrong key.
+_written = fai.drafts_key(survey.slugify("Testing2", "1"))
+_old_lookup = fai.drafts_key(survey.slugify("", "1"))
+_new_lookup = fai.drafts_key(survey.slugify(restored["course"], restored["eval_no"]))
+check("the old lookup missed the saved drafts", _written != _old_lookup)
+check("restoring the course reconnects them", _written == _new_lookup)
+
+# Named bundles now carry everything, and old ones still load.
+_bundle = pws.bundle_bytes(long_df, ss(at, "self_evals"), ss(at, "roster"),
+                           "Testing2", "1",
+                           {k: d.to_dict() for k, d in part.items()})
+_bstate, _bnote = pws.read_bundle(_bundle)
+check("a bundle carries the responses", len(_bstate["long_df"]) == len(long_df))
+check("a bundle carries the self-evaluations", bool(_bstate["self_evals"]))
+check("a bundle carries the roster", _bstate["roster"] is not None)
+check("a bundle carries the AI drafts", len(_bstate["drafts"]) == 2)
+check("a bundle carries the course name", _bstate["course"] == "Testing2")
+_rebuilt = {k: fai.Draft.from_dict(v) for k, v in _bstate["drafts"].items()}
+check("approvals survive a bundle round trip",
+      set(fai.approved_narratives(_rebuilt)) == {target.key})
+
+import io as _bio
+_legacy = _bio.BytesIO()
+long_df.to_parquet(_legacy, index=False)
+_lstate, _lnote = pws.read_bundle(_legacy.getvalue())
+check("legacy bundles still load", len(_lstate["long_df"]) == len(long_df))
+check("and say what they could not carry", "responses only" in _lnote)
+
 print("\n== SUMMARY ==")
 passed = sum(1 for _, ok in results if ok)
 print(f"{passed}/{len(results)} checks passed")

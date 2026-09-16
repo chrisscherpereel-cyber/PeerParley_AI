@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.4.0 — the session actually persists now
+
+In 2.2.0 I made the AI drafts durable and called the persistence problem
+solved. It wasn't, and a live run showed why: an uploaded survey plus its
+generated output disappeared on sign-out. Two defects, one of them mine twice
+over.
+
+### The drafts were never lost — they were unaddressable
+
+Drafts are keyed by survey slug, and the slug is built from the course box,
+which resets to empty on sign-in. Drafts written under `Testing2-eval1` were
+then looked for under `section-eval1`. They were sitting in the vault the whole
+time under a name the app had forgotten how to ask for.
+
+Persistence keyed to transient UI state is not persistence. So the fix isn't a
+better key: the **workspace** is now durable and restores as a unit, course
+name included, which is what reconnects the drafts.
+
+### The responses were never persisted at all
+
+`long_df` lived in `st.session_state` alone. Worse, the `.ppx` bundle — the one
+deliberate save available — held *only* `long_df`. `self_evals` (every
+self-rating) and `roster` (every name-to-email mapping) were not in it, so even
+a diligent manual save came back without the self-evaluation column and without
+the ability to email anyone.
+
+New in this release:
+
+- **`peerparley/workspace.py`** — autosaves the responses, self-evaluations,
+  roster, course and evaluation number per instructor, to the encrypted vault.
+  Fingerprint-guarded, best-effort, never raises.
+- **A "Resume it" card in the sidebar** naming what it would bring back
+  ("Testing2 · Eval 1 · 40 evaluation rows · saved Sep 15 at 11:08 PM"), plus
+  Discard. Resuming pre-sets the slug so the cross-survey guard doesn't read the
+  restored course as a survey switch and wipe what was just loaded.
+- **`.ppx` bundles now carry everything**: responses, self-evaluations, roster,
+  course name, and the AI drafts with their edits and approvals. Bundles written
+  by earlier versions still load, and say plainly what that format could not
+  carry rather than handing back a thinner session in silence.
+- **Orphaned drafts are visible.** When the panel finds none for the current
+  survey but some exist for others, it lists those slugs instead of leaving them
+  invisible — the state that produced "my info was gone".
+
+### Known behaviour, not a bug
+
+A Qualtrics/raw upload doesn't create a *survey record*, which is why an
+uploaded course never appears in the sidebar dropdown — that list is built from
+saved survey setups. The resume card covers it, so the dropdown is no longer
+the only way back to an uploaded section.
+
+11 new tests (95 total) and 16 new end-to-end checks (69 total).
+
 ## 2.3.0 — the model flexibility TransQ had, restored
 
 v2 shipped OpenRouter with seven hardcoded model slugs and a free-text box.
