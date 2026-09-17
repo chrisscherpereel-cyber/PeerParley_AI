@@ -323,6 +323,22 @@ def sidebar_settings(vault=None, username: str = "") -> AISettings:
                  "the round. The figures themselves are never quoted to the "
                  "student. Confidential comments are never shared either way.",
         )
+        s.max_tokens = st.select_slider(
+            "Reply size limit (tokens)", [1600, 2500, 4000, 6000, 8000],
+            value=s.max_tokens if s.max_tokens in (1600, 2500, 4000, 6000, 8000)
+            else 4000, key="ai_max_tokens",
+            help="The ceiling on one reply. You pay for tokens produced, not for "
+                 "the cap, so a generous ceiling costs nothing and avoids "
+                 "truncated drafts. Free-router models often ignore the length "
+                 "instruction and need the headroom.",
+        )
+        s.retry_truncated = st.checkbox(
+            "Retry once, larger, if a reply is cut off", value=s.retry_truncated,
+            key="ai_retry_trunc",
+            help="Asks again with a much bigger ceiling rather than handing back "
+                 "a half-written draft. If the second attempt is also cut off, "
+                 "whatever text arrived is recovered and kept.",
+        )
         s.extra_guidance = st.text_area(
             "Extra instruction (optional)", value=s.extra_guidance,
             key="ai_guidance", height=70,
@@ -633,8 +649,8 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         stats = fai.batch_stats(fresh)
         line = (
             f"{stats['written']} narrative(s) written · {stats['clean']} clean · "
-            f"{stats['flagged']} flagged · {stats['thin']} too thin to write · "
-            f"{stats['errors']} failed."
+            f"{stats['flagged']} flagged · {stats['empty']} came back empty · "
+            f"{stats['thin']} too thin to write · {stats['errors']} failed."
         )
         # Not a success when nothing was written. Saying "Drafted 40" over forty
         # failures is how an instructor ends up believing the run worked.
@@ -688,15 +704,34 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
 
     # ---- batch status ----------------------------------------------------
     stats = fai.batch_stats(drafts)
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Written", stats["written"],
-              help="Drafts that produced usable text. Failures and students with "
-                   "too few comments are counted separately.")
+              help="Drafts that produced usable text. Failures, empty replies "
+                   "and students with too few comments are counted separately.")
     m2.metric("Approved", stats["approved"])
     m3.metric("Need a read", stats["flagged"])
-    m4.metric("Unsupported claims", stats["high"])
-    m5.metric("Failed", stats["errors"],
+    m4.metric("Unsupported claims", stats["high"],
+              help="Claims the checks could not trace to a real comment.")
+    m5.metric("Came back empty", stats["empty"],
+              help="The request succeeded but the model wrote nothing. Retry "
+                   "these, or pin a stronger model.")
+    m6.metric("Failed", stats["errors"],
               help="Requests that errored. These wrote nothing.")
+
+    if stats["empty"]:
+        st.warning(
+            f"{stats['empty']} draft(s) came back empty — the call succeeded but "
+            "the model produced no narrative. That is a model-quality problem, "
+            "not a grounding one: retry them, or pin a stronger model than the "
+            "free router.", icon="⚠️",
+        )
+    if stats["truncated"]:
+        st.info(
+            f"{stats['truncated']} draft(s) were recovered from a cut-off reply "
+            "and may be missing their ending. Read those against the comments "
+            "before approving; raising the reply size limit in the sidebar "
+            "usually prevents it.", icon="✂️",
+        )
 
     # One banner per distinct failure, however many students it hit.
     for message, names in fai.error_groups(drafts):
@@ -780,6 +815,17 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         with st.expander(header, expanded=bool(d.high_severity) and not d.approved):
             if not d.ok:
                 st.error(d.error)
+                if d.raw_partial:
+                    st.caption(
+                        f"{len(d.raw_partial)} characters did arrive before the "
+                        "cut. Nothing could be parsed out of them, but they are "
+                        "here rather than discarded — copy anything useful."
+                    )
+                    with st.expander("What came back"):
+                        st.text_area(
+                            "Partial reply", value=d.raw_partial, height=200,
+                            key=f"ai_raw_{m.key}", label_visibility="collapsed",
+                        )
                 st.caption("Use *Draft the remaining* above to retry this student.")
                 continue
 
@@ -790,8 +836,22 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                         by_key[m.key], include_ratings=settings.include_ratings))
                 continue
 
+            if d.empty:
+                st.warning(
+                    "The request succeeded but the model returned no narrative "
+                    "text. Nothing was written for this student — retry them, "
+                    "or pin a stronger model than the free router.",
+                    icon="⚠️",
+                )
+
             left, right = st.columns([1.15, 1])
             with left:
+                if d.truncated and d.raw_partial:
+                    st.caption(
+                        f"⚠️ Recovered from a cut-off reply ({len(d.raw_partial)} "
+                        "characters arrived). Read it against the comments before "
+                        "approving — the end may be missing."
+                    )
                 st.markdown("**Draft — edit as you like**")
                 edited = st.text_area(
                     "Narrative", value=d.edited or d.text(),
@@ -810,7 +870,10 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                                "text above no longer contains them.")
 
             with right:
-                tabs = st.tabs(["Source comments", "Citations", "Flags"])
+                _tab_names = ["Source comments", "Citations", "Flags"]
+                if d.raw_partial:
+                    _tab_names.append("Raw reply")
+                tabs = st.tabs(_tab_names)
                 with tabs[0]:
                     _source_panel(fai.build_source(
                         by_key[m.key], include_ratings=settings.include_ratings))
@@ -827,6 +890,13 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                         )
                     if d.verified:
                         st.caption(f"Grounding score: {d.score:.0%}")
+                if d.raw_partial:
+                    with tabs[3]:
+                        st.caption(
+                            "Exactly what the model sent before it was cut off. "
+                            "The draft on the left was recovered from this."
+                        )
+                        st.code(d.raw_partial, language="json")
 
     st.session_state[STATE_KEY] = drafts
     # Edits and approvals made on this run are worth as much as the drafts.

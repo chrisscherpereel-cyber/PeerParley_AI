@@ -342,6 +342,7 @@ def test_api_failure_becomes_a_draft_not_an_exception(student, settings):
 
 def test_truncated_reply_is_salvaged(student, settings):
     """A reply cut off after two good fields is worth two fields, not zero."""
+    settings.retry_truncated = False          # exercise salvage, not the retry
     partial = (
         '{"strengths": "Your teammates valued the regression model you built.",\n'
         ' "strength_points": [{"point": "You built the regression model.",'
@@ -358,12 +359,141 @@ def test_truncated_reply_is_salvaged(student, settings):
     assert draft.strength_points and draft.strength_points[0].quote_ok
     assert any("cut off" in f.problem for f in draft.flags)
     assert not draft.clean          # a partial draft still wants a human read
+    assert draft.raw_partial == partial     # nothing discarded
 
 
-def test_unsalvageable_truncation_fails_cleanly(student, settings):
+def test_truncation_retries_once_with_a_bigger_ceiling(student, settings):
+    """"Resubmit to complete" — done automatically rather than by hand x40."""
+    settings.retry_truncated = True
+    settings.max_tokens = 1600
+
+    class CutThenSucceed(FakeClient):
+        def __init__(self, payload):
+            super().__init__()
+            self.payload = payload
+            self.caps = []
+
+        def complete_json(self, system, user, max_tokens=None):
+            self.prompts.append((system, user))
+            self.caps.append(max_tokens)
+            self.usage.add(Usage(500, 200, 1))
+            if len(self.caps) == 1:
+                raise TruncatedResponseError("cut off", raw='{"strengths": "half')
+            return self.payload
+
+    client = CutThenSucceed(GOOD_PAYLOAD)
+    draft = fai.generate_draft(client, fai.build_source(student), settings)
+
+    assert len(client.caps) == 2
+    assert client.caps[1] > client.caps[0]          # real headroom, not a nudge
+    assert client.caps[1] <= fai.MAX_RETRY_TOKENS
+    # A completed retry is a clean draft, not a salvaged one.
+    assert draft.ok and not draft.truncated
+    assert "regression model" in draft.text()
+    assert draft.raw_partial == ""
+
+
+def test_retry_can_be_switched_off(student, settings):
+    settings.retry_truncated = False
+    client = FakeClient(TruncatedResponseError("cut off", raw='{"strengths": "half'))
+    fai.generate_draft(client, fai.build_source(student), settings)
+    assert len(client.prompts) == 1          # asked once, salvaged, moved on
+
+
+def test_prose_cut_mid_first_field_is_recovered(student, settings):
+    """The live failure: 7233 characters, and the old code kept none of it.
+
+    Structural salvage needs a comma at depth one to close the object, so a
+    reply cut inside its first field yielded nothing at all.
+    """
+    settings.retry_truncated = False
+    long_prose = ("Your teammates highlighted the VP role you played in the "
+                  "simulation, and more than one singled out your supply-chain "
+                  "decisions as sound. " * 40)
+    raw = '{"strengths": "' + long_prose
+    assert len(raw) > 4000
+
+    assert salvage_object_fields(raw) == {}      # the old path: total loss
+
+    client = FakeClient(TruncatedResponseError(
+        f"stopped at its output limit after {len(raw)} characters", raw=raw))
+    draft = fai.generate_draft(client, fai.build_source(student), settings)
+
+    assert draft.ok                               # not thrown away
+    assert draft.truncated
+    assert "VP role" in draft.text()
+    assert len(draft.text()) > 1000               # thousands of chars rescued
+    assert draft.raw_partial == raw
+    assert not draft.clean                        # still needs a read
+    assert any("incomplete" in f.problem for f in draft.flags)
+
+
+def test_a_prose_only_reply_is_still_offered_to_the_instructor(student, settings):
+    """A model that answered in prose instead of JSON still did the work."""
+    settings.retry_truncated = False
+    prose = ("Kyle played the VP role in the simulation and his teammates "
+             "credited his supply-chain decisions. One asked for better "
+             "communication going forward. " * 3)
+    client = FakeClient(TruncatedResponseError("cut off", raw=prose))
+    draft = fai.generate_draft(client, fai.build_source(student), settings)
+
+    assert draft.ok
+    assert "VP role" in draft.text()
+    assert draft.raw_partial == prose
+
+
+def test_truncation_with_nothing_usable_still_keeps_the_raw(student, settings):
+    settings.retry_truncated = False
     client = FakeClient(TruncatedResponseError("cut off", raw="{"))
     draft = fai.generate_draft(client, fai.build_source(student), settings)
     assert not draft.ok and draft.truncated
+    assert draft.raw_partial == "{"          # even here, kept for inspection
+
+
+def test_an_empty_reply_is_not_reported_as_a_minor_flag(student, settings):
+    """Kyle Bartnik: an empty text box beside "1 minor flag(s)".
+
+    The call succeeded and every narrative field came back blank. That used to
+    read as a finished draft with a nitpick, which is the most misleading thing
+    the panel could say.
+    """
+    settings.retry_truncated = False
+    client = FakeClient({"strengths": "", "strength_points": [], "focus": "",
+                         "focus_points": [], "disagreement": "",
+                         "insufficient_evidence": ""})
+    draft = fai.generate_draft(client, fai.build_source(student), settings)
+
+    assert draft.ok                  # the request itself did not fail
+    assert draft.empty               # but it produced nothing
+    assert not draft.clean           # so it cannot be bulk-approved
+    assert draft.score == 0.0
+    assert draft.high_severity       # and it is flagged loudly, not mildly
+    assert "came back empty" in draft.summary()
+    assert "retry" in draft.summary()
+
+
+def test_an_empty_draft_contributes_no_narrative_even_if_approved():
+    d = fai.Draft(key="a", name="A", team="1", approved=True)
+    assert d.empty
+    assert fai.approved_narratives({"a": d}) == {}
+
+
+def test_a_real_draft_is_not_flagged_empty(student, settings):
+    settings.retry_truncated = False
+    client = FakeClient(GOOD_PAYLOAD)
+    draft = fai.generate_draft(client, fai.build_source(student), settings)
+    assert not draft.empty and draft.clean
+
+
+def test_raw_partial_survives_the_vault_round_trip():
+    """The rescued text has to still be there after signing out."""
+    vault = MemoryVault()
+    d = fai.Draft(key="a", name="A", team="1", strengths="Recovered prose.",
+                  truncated=True, raw_partial='{"strengths": "Recovered prose')
+    fai.save_drafts(vault, "s", {"a": d})
+    back, _ = fai.load_drafts(vault, "s")
+    assert back["a"].raw_partial == '{"strengths": "Recovered prose'
+    assert back["a"].truncated
 
 
 # --------------------------------------------------------------------------- #
@@ -1391,3 +1521,22 @@ def test_old_bundles_still_load_and_say_what_is_missing():
     assert len(state["long_df"]) == 2
     assert state["self_evals"] == {} and state["drafts"] == {}
     assert "responses only" in note          # and it says so rather than pretending
+
+
+def test_empty_drafts_get_their_own_metric_not_unsupported_claims():
+    """An empty reply is a model-quality problem, not a grounding one."""
+    real_claim = fai.Draft(key="a", name="A", team="1", strengths="Real text.")
+    real_claim.flags = [fai.Flag(text="x", problem="invented advice",
+                                 severity="high")]
+    came_back_empty = fai.Draft(key="b", name="B", team="1")
+    came_back_empty.flags = [fai.Flag(text="(whole draft)",
+                                      problem="returned no narrative text",
+                                      severity="high")]
+    recovered = fai.Draft(key="c", name="C", team="1", strengths="Partial text.",
+                          truncated=True, raw_partial='{"strengths": "Partial')
+
+    st = fai.batch_stats({"a": real_claim, "b": came_back_empty, "c": recovered})
+    assert st["high"] == 1          # only the genuine ungrounded claim
+    assert st["empty"] == 1
+    assert st["truncated"] == 1
+    assert st["written"] == 2       # the empty one produced nothing

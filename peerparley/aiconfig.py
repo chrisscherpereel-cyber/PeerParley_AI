@@ -236,7 +236,7 @@ def configured_providers() -> List[str]:
 SETTINGS_FIELDS = (
     "enabled", "provider", "model", "temperature", "max_tokens", "tone",
     "target_words", "verify", "verify_threshold", "local_base_url",
-    "include_ratings", "extra_guidance",
+    "include_ratings", "extra_guidance", "retry_truncated",
 )
 
 
@@ -325,7 +325,15 @@ class AISettings:
     # Low by default. This task is rewording someone else's words, not creative
     # writing — a higher temperature buys nothing and costs faithfulness.
     temperature: float = 0.2
-    max_tokens: int = 1600
+    # Raised from 1600 after a live run: models on the free router routinely
+    # ignore the length instruction and ramble past a tight cap, and the cost of
+    # a generous ceiling is nothing (you pay for tokens produced, not for the
+    # cap) while the cost of hitting it is a truncated draft.
+    max_tokens: int = 4000
+    # On truncation, retry once with a bigger ceiling rather than handing back a
+    # half-written draft. This is the "resubmit to complete" that an instructor
+    # would otherwise do by hand, forty times.
+    retry_truncated: bool = True
     tone: str = DEFAULT_TONE
     # Roughly how long the narrative should run. Students stop reading long
     # before an instructor stops writing.

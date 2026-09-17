@@ -209,6 +209,44 @@ local models show an exact `$0.00`.
 Rough order of magnitude for a 30-student section with the audit on (60 calls):
 a few cents on a mini/flash model, well under a dollar on a frontier one.
 
+## Cut-off and empty replies
+
+### A partial reply is never discarded
+
+A model that overruns its token budget has still written most of a draft, and
+that text is already paid for. Recovery works down four levels:
+
+1. **Retry once with a much bigger ceiling.** The only level that produces a
+   *complete* draft, so it goes first — it's the "resubmit to complete" you'd
+   otherwise do by hand, once per student. On by default; switch it off under
+   Writing options.
+2. **Structural salvage** — the top-level fields that closed cleanly.
+3. **Prose salvage** — text recovered from a field cut mid-sentence. This is the
+   one that matters most: a rambling model hits the cap inside its first
+   paragraph, where structural salvage finds nothing and thousands of readable
+   characters are at stake.
+4. **A readable fragment** of whatever arrived, even if no parser could touch it
+   — a model that answered in prose instead of JSON still did the work.
+
+A recovered draft is labelled as such ("Recovered from a cut-off reply — 7233
+characters arrived"), carries a flag so it can't be bulk-approved, and keeps the
+exact raw reply under a **Raw reply** tab. Even a draft that failed outright
+shows what arrived under **What came back**, so nothing is invisible.
+
+If drafts keep getting cut off, raise **Reply size limit** in the sidebar. You
+pay for tokens produced, not for the cap, so a generous ceiling costs nothing.
+
+### "Came back empty"
+
+The request succeeded and the model returned no narrative at all. This is a
+**model-quality** problem, not a grounding one, so it has its own metric rather
+than counting as an unsupported claim. It shows as a loud flag, is excluded from
+bulk approval, and says to retry or pin a stronger model — earlier versions
+reported it as "1 minor flag(s)" beside an empty text box, which read as though
+the draft were fine.
+
+Free-router models cause most of these. Pinning a real model fixes it.
+
 ## When every student fails at once
 
 **First: check which build is running.** The sidebar shows the version next to
@@ -326,7 +364,7 @@ grading changes either way.
 | `peerparley/openrouter_catalog.py` | The live OpenRouter catalog (ported from TransQ) |
 | `peerparley/localmodels.py` | Local server probing and model discovery (ported from TransQ) |
 | `peerparley/workspace.py` | Session autosave and the complete `.ppx` bundle format |
-| `tests/test_feedback_ai.py` | 95 offline tests; no API key needed |
+| `tests/test_feedback_ai.py` | 104 offline tests; no API key needed |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to

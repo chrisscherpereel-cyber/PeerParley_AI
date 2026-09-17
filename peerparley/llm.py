@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .aiconfig import Provider, get_provider
 
@@ -598,6 +598,80 @@ def _is_auth(exc: Exception) -> bool:
     # A 403 can also mean "region blocked" or "model not allowed", but the fix
     # in every case starts with the credential, so it lands here.
     return any(m in text for m in _AUTH_MARKERS)
+
+
+def salvage_partial_strings(raw: str, keys: Sequence[str]) -> Dict[str, str]:
+    """Recover named string fields from a reply cut off mid-value.
+
+    ``salvage_object_fields`` needs a comma at depth one to close the object, so
+    a reply truncated *inside the first field* yields nothing — and when that
+    field is a paragraph of narrative, "nothing" can mean discarding seven
+    thousand characters of usable prose that was already paid for. A model that
+    rambles past its token budget is exactly the case where the most text is at
+    stake.
+
+    So this reads the raw text directly: find ``"<key>": "``, then walk forward
+    to the closing quote, or to the end of what arrived. Whatever came back is
+    returned as plain text with JSON escapes undone.
+
+    Deliberately not a JSON parser. It is the last thing tried, after real
+    parsing and structural salvage have both failed, and its only job is to
+    rescue prose a human can read and edit.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {}
+
+    fence = re.search(r"```(?:json)?\s*(.*)", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+
+    found: Dict[str, str] = {}
+    for key in keys:
+        marker = re.search(rf'"{re.escape(key)}"\s*:\s*"', text)
+        if not marker:
+            continue
+        out: List[str] = []
+        escaped = False
+        for char in text[marker.end():]:
+            if escaped:
+                out.append({"n": "\n", "t": "\t", "r": "\r"}.get(char, char))
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':          # the value closed normally
+                break
+            out.append(char)
+        value = "".join(out).strip()
+        if value:
+            found[key] = value
+    return found
+
+
+def readable_fragment(raw: str, min_chars: int = 40) -> str:
+    """Whatever prose can be pulled from a reply that defied every parser.
+
+    The floor of the recovery ladder. A model that answered with an essay
+    instead of JSON still produced the instructor's feedback — it simply put it
+    in the wrong shape, and throwing it away for that would be perverse when a
+    human can read it in five seconds.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    fence = re.search(r"```(?:json)?\s*(.*)", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+    # Strip the JSON scaffolding a half-written object leaves behind, so what
+    # is shown reads as sentences rather than as debris.
+    text = re.sub(r'^\s*[\{\[]', " ", text)
+    text = re.sub(r'"\s*[a-z_]+"\s*:\s*', " ", text)
+    text = text.replace('\\n', "\n").replace('\\"', '"')
+    text = re.sub(r'[\{\[\]"]+', " ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text).strip(" ,:\n\t")
+    return text if len(text) >= min_chars else ""
 
 
 def _is_transient(exc: Exception) -> bool:

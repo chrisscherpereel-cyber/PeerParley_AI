@@ -52,8 +52,19 @@ from .llm import (
     LLMError,
     TruncatedResponseError,
     Usage,
+    readable_fragment,
     salvage_object_fields,
+    salvage_partial_strings,
 )
+
+# Ceiling for the automatic retry after a truncated reply. Generous, because
+# you pay for tokens produced rather than for the cap, and a second truncation
+# wastes the whole retry.
+MAX_RETRY_TOKENS = 12000
+
+# Narrative fields that hold prose, in the order they read. Used by the string
+# salvage so a reply cut mid-paragraph still yields something.
+NARRATIVE_KEYS = ("strengths", "focus", "disagreement")
 
 # How much of a cited quote must appear in the evidence for the citation to
 # count. Models normalize whitespace, fix a typo, or trim a trailing clause when
@@ -270,6 +281,11 @@ class Draft:
     error: str = ""
     truncated: bool = False
     usage: Usage = field(default_factory=Usage)
+    # Whatever arrived before a cut, kept even when nothing could be parsed out
+    # of it. Seven thousand characters of readable prose is not a failure to be
+    # discarded — it is a draft in the wrong shape, and the instructor can see
+    # it and use it.
+    raw_partial: str = ""
 
     # ---------------------------------------------------------------- #
 
@@ -290,7 +306,8 @@ class Draft:
         ran. A draft that was never audited is not a clean draft; it is an
         unaudited one, and the bulk-approve action must not treat the two alike.
         """
-        return self.ok and not self.flags and self.score >= 0.999
+        return (self.ok and not self.flags and self.score >= 0.999
+                and not self.empty)
 
     def text(self) -> str:
         """The narrative as it would appear in the PDF."""
@@ -305,12 +322,28 @@ class Draft:
     def sentences(self) -> List[str]:
         return [s.strip() for s in _SENT_SPLIT.split(self.text()) if s.strip()]
 
+    @property
+    def empty(self) -> bool:
+        """Succeeded as a request, produced no narrative.
+
+        A distinct state from both "failed" and "too thin to write": the call
+        came back, so nothing errored, but every narrative field was blank. It
+        used to surface as "1 minor flag(s)" beside an empty text box, which
+        reads as though the draft were fine — the single most confusing thing
+        the panel could say.
+        """
+        return (self.ok and not self.insufficient_evidence
+                and not self.text().strip())
+
     def summary(self) -> str:
         """One-line status for the review table."""
         if self.error:
             return f"⚠ {self.error[:80]}"
         if self.insufficient_evidence:
             return "Not enough comments to write from"
+        if self.empty:
+            return ("⚠ came back empty — retry this student"
+                    + (" (partial text kept below)" if self.raw_partial else ""))
         if not self.flags:
             return "Grounded" if self.verified else "Generated (not verified)"
         high = len(self.high_severity)
@@ -333,6 +366,7 @@ class Draft:
             "edited": self.edited, "approved": self.approved,
             "model": self.model, "provider": self.provider,
             "error": self.error, "truncated": self.truncated,
+            "raw_partial": self.raw_partial,
             "usage": {
                 "input_tokens": self.usage.input_tokens,
                 "output_tokens": self.usage.output_tokens,
@@ -373,6 +407,7 @@ class Draft:
             provider=str(d.get("provider", "") or ""),
             error=str(d.get("error", "") or ""),
             truncated=bool(d.get("truncated", False)),
+            raw_partial=str(d.get("raw_partial", "") or ""),
             usage=Usage(int(u.get("input_tokens", 0) or 0),
                         int(u.get("output_tokens", 0) or 0),
                         int(u.get("calls", 0) or 0)),
@@ -562,41 +597,111 @@ def generate_draft(
     before = Usage(client.usage.input_tokens, client.usage.output_tokens,
                    client.usage.calls)
 
+    # A truncated reply is recovered through four levels, in descending order
+    # of fidelity, because a reply cut off is not a reply lost:
+    #
+    #   1. Ask again with a bigger ceiling. This is the only level that yields a
+    #      *complete* draft, so it is tried first — and it is what an instructor
+    #      would otherwise do by hand, once per student.
+    #   2. Structural salvage: the top-level fields that closed cleanly.
+    #   3. String salvage: prose recovered from a field cut mid-sentence. This is
+    #      the one that matters most in practice, because a rambling model hits
+    #      the cap inside its first paragraph, where structural salvage finds
+    #      nothing and thousands of readable characters are at stake.
+    #   4. A readable fragment of whatever arrived, kept on the draft so the
+    #      instructor can see and use it even when no parser could.
     truncated = False
-    try:
-        payload = client.complete_json(system, user, max_tokens=settings.max_tokens)
-    except AuthLLMError:
-        # Not this student's problem, and not survivable by moving to the next
-        # one. Let it out so the batch can stop at the first occurrence.
-        raise
-    except TruncatedResponseError as exc:
-        # Salvage: the fields that finished are complete and already paid for.
-        payload = salvage_object_fields(exc.raw)
-        truncated = True
+    partial_raw = ""
+    tokens = settings.max_tokens
+    attempts = 1 + (1 if settings.retry_truncated else 0)
+    payload: Optional[Dict[str, Any]] = None
+    last_cut: Optional[TruncatedResponseError] = None
+
+    for attempt in range(attempts):
+        try:
+            payload = client.complete_json(system, user, max_tokens=tokens)
+            # A retry that came back whole produced a complete draft, so the
+            # earlier cut is history: it must not be flagged as incomplete or
+            # carry a stale partial. That is the whole point of retrying.
+            truncated = False
+            partial_raw = ""
+            break
+        except AuthLLMError:
+            # Not this student's problem, and not survivable by moving to the
+            # next one. Let it out so the batch can stop at the first occurrence.
+            raise
+        except TruncatedResponseError as exc:
+            truncated = True
+            last_cut = exc
+            partial_raw = exc.raw or partial_raw
+            payload = None
+            if attempt + 1 < attempts:
+                # Retry once, with real headroom rather than a nudge: a model
+                # that overran 4k by a little will overrun 4.5k too.
+                tokens = min(max(tokens * 3, 6000), MAX_RETRY_TOKENS)
+                continue
+            break
+        except LLMError as exc:
+            return _failed(src, settings, str(exc))
+        except Exception as exc:  # pragma: no cover - defensive
+            return _failed(src, settings, f"Unexpected error: {exc}")
+
+    if payload is None:
+        # The retry (if any) was also cut. Work down the recovery ladder.
+        payload = salvage_object_fields(partial_raw)
+        recovered_by = "the fields that finished" if payload else ""
         if not payload:
-            return _failed(src, settings, str(exc), truncated=True)
-    except LLMError as exc:
-        return _failed(src, settings, str(exc))
-    except Exception as exc:  # pragma: no cover - defensive
-        return _failed(src, settings, f"Unexpected error: {exc}")
+            strings = salvage_partial_strings(partial_raw, NARRATIVE_KEYS)
+            if strings:
+                payload = dict(strings)
+                recovered_by = "prose recovered from the cut-off reply"
+        if not payload:
+            fragment = readable_fragment(partial_raw)
+            if fragment:
+                payload = {"strengths": fragment}
+                recovered_by = "readable text pulled from an unparseable reply"
+        if not payload:
+            failed = _failed(src, settings,
+                             str(last_cut) if last_cut else "Reply was cut off.",
+                             truncated=True)
+            failed.raw_partial = partial_raw
+            return failed
 
     draft = _draft_from_payload(payload, src, settings)
     draft.truncated = truncated
+    draft.raw_partial = partial_raw if truncated else ""
     draft.usage = Usage(
         client.usage.input_tokens - before.input_tokens,
         client.usage.output_tokens - before.output_tokens,
         client.usage.calls - before.calls,
     )
     if truncated:
+        detail = ("the model's reply was cut off twice, even with a raised token "
+                  "cap" if attempts > 1 else "the model's reply was cut off")
+        if partial_raw:
+            detail += f"; {len(partial_raw)} characters arrived"
         draft.flags.append(Flag(
             text="(whole draft)",
-            problem="the model's reply was cut off; this draft may be incomplete",
+            problem=(f"{detail} — this draft is incomplete and needs reading "
+                     "against the comments"),
             severity="low", origin="quote-check",
         ))
 
     check_quotes(draft, src)
 
-    if settings.verify and draft.text():
+    if draft.empty:
+        # The call succeeded and produced nothing. Flag it explicitly rather
+        # than letting it sit in the panel looking finished.
+        draft.flags.append(Flag(
+            text="(whole draft)",
+            problem=("the model returned no narrative text at all — retry this "
+                     "student, or pin a stronger model"),
+            severity="high", origin="quote-check",
+        ))
+        draft.score = 0.0
+        return draft
+
+    if settings.verify:
         verify_draft(client, draft, src)
     else:
         # No audit ran, so the score is not a judgement — only the citation
@@ -960,9 +1065,14 @@ def batch_stats(drafts: Dict[str, Draft]) -> Dict[str, Any]:
         "written": sum(1 for d in values if d.ok and d.text().strip()),
         "approved": sum(1 for d in values if d.approved),
         "clean": sum(1 for d in values if d.clean),
-        "flagged": sum(1 for d in values if d.ok and d.flags),
-        "high": sum(1 for d in values if d.high_severity),
+        "flagged": sum(1 for d in values if d.ok and d.flags and not d.empty),
+        # Empty drafts carry a high-severity flag of their own, but they are not
+        # ungrounded claims — counting them under "unsupported claims" would
+        # describe the wrong problem. They get their own number.
+        "high": sum(1 for d in values if d.high_severity and not d.empty),
+        "empty": sum(1 for d in values if d.empty),
         "errors": sum(1 for d in values if not d.ok),
         "thin": sum(1 for d in values if d.insufficient_evidence),
+        "truncated": sum(1 for d in values if d.ok and d.truncated),
         "usage": usage,
     }

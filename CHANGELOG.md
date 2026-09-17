@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.5.0 — partial replies are recovered, and empty ones say so
+
+Two problems from the same screenshot, both mine.
+
+### 7233 characters were being thrown away
+
+A student failed with "stopped at its output limit after 7233 characters". Those
+characters were a nearly-complete narrative, and the code kept none of them:
+`salvage_object_fields` needs a comma at depth one to close the object, so a
+reply cut off *inside its first field* salvaged nothing. A rambling model hits
+the cap mid-paragraph, which is exactly where the most text is at stake and
+exactly where the old salvage was blind.
+
+Recovery is now a four-level ladder:
+
+1. **Retry once with a much bigger ceiling** (`retry_truncated`, on by default).
+   The only level that yields a *complete* draft, so it goes first — it is the
+   "resubmit to complete" an instructor would otherwise do by hand forty times.
+   A retry that comes back whole clears the truncation state entirely; a
+   completed draft is not a salvaged one.
+2. **Structural salvage** — the fields that closed cleanly (unchanged).
+3. **`salvage_partial_strings`** — prose recovered from a field cut mid-sentence.
+4. **`readable_fragment`** — whatever prose can be pulled from a reply no parser
+   could touch. A model that answered in prose instead of JSON still did the
+   work.
+
+Every draft now keeps `raw_partial`: the exact bytes that arrived before the
+cut, shown under a **Raw reply** tab, and under **What came back** even when the
+draft failed outright. Nothing is discarded silently.
+
+The default reply cap rose from 1600 to 4000 tokens, and is now adjustable in
+the sidebar. You pay for tokens produced, not for the cap, so a tight ceiling
+bought nothing and cost truncated drafts.
+
+### An empty draft no longer reads as a good one
+
+One student showed an empty text box beside "🟡 1 minor flag(s)" — the call had
+succeeded with every narrative field blank, and the only flag was the
+truncation note. That is the most misleading thing the panel could say.
+
+`Draft.empty` is now an explicit state, distinct from both "failed" and "too
+thin to write". It carries a high-severity flag, scores 0.0, is excluded from
+bulk approval and from `approved_narratives`, summarises as "came back empty —
+retry this student", and gets its **own metric** rather than inflating
+"Unsupported claims" — an empty reply is a model-quality problem, not a
+grounding one. A "Recovered from a cut-off reply" count sits alongside it.
+
+9 new tests (104 total).
+
 ## 2.4.0 — the session actually persists now
 
 In 2.2.0 I made the AI drafts durable and called the persistence problem
