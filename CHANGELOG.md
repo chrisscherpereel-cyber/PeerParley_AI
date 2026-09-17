@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.6.0 — the free tier, made workable
+
+Prompted by a direct question: is there a free OpenRouter option that works for
+this? Yes, but only if you plan around the daily ceiling — which the app was
+doing nothing to help with.
+
+OpenRouter's published free-tier limits are 20 requests/minute and 50
+requests/day, rising to 1,000/day once an account has ever purchased 10
+credits. A 40-student section with the grounding audit on is **80 requests**,
+so it silently exceeded the cap. That is very likely a contributing cause of
+the earlier mass failures, alongside the rejected key.
+
+- **A pre-flight budget** in the panel: the request count against the free cap,
+  shown before the batch rather than discovered at student 25, with the
+  arithmetic for turning the audit off.
+- **Automatic pacing** when a free model is selected — 18/min, just under the
+  limit. `LLMClient.min_interval` waits between calls; pacing is strictly
+  cheaper than absorbing a 429, which costs a round trip, a backoff sleep, and
+  possibly part of the daily allowance. Paid models are never slowed.
+- `llm.is_free_model`, `FREE_TIER_RPM`, `FREE_TIER_DAILY` and
+  `FREE_TIER_DAILY_WITH_CREDITS` state the policy in one place so the UI can do
+  arithmetic against it.
+- **Refreshed free-model seeds** to the current roster
+  (`nvidia/nemotron-3-ultra-550b:free`, `nvidia/nemotron-3.5-lightning:free`,
+  `thinkingmachines/inkling:free`); TransQ's snapshot had gone stale. The live
+  catalog remains the authority.
+- `docs/AI_FEEDBACK.md` gains a free-tier section with the section-size table.
+
+5 new tests (109 total).
+
 ## 2.5.0 — partial replies are recovered, and empty ones say so
 
 Two problems from the same screenshot, both mine.

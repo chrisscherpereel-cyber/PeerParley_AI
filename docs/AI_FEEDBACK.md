@@ -143,8 +143,41 @@ though it were current. You can still type any slug by hand.
 
 A caveat specific to this task: free models are rate-limited and smaller, and
 rewording peer comments *without adding to them* punishes a weak model in a way
-that's easy to miss, because the output still reads fluently. For a whole
-section, pin a real model.
+that's easy to miss, because the output still reads fluently.
+
+### Running on OpenRouter's free tier
+
+It works, but the daily ceiling is the thing to plan around. OpenRouter's
+published free-tier limits are **20 requests per minute** and **50 requests per
+day** — rising to **1,000 per day** once an account has ever purchased 10
+credits (a one-time $10; the credits themselves don't expire into the limit,
+the higher ceiling just stays).
+
+| Section size | Audit on (2 calls each) | Audit off (1 call each) |
+|---|---|---|
+| 20 students | 40 — fits in 50/day | 20 — fits |
+| **40 students** | **80 — exceeds 50/day** | 40 — fits, no headroom |
+| 40 students, after the $10 purchase | 80 — fits easily | 40 — fits easily |
+
+So for a 40-student section on a never-funded account, either turn the grounding
+audit off, or split the run across two days. The panel does this arithmetic for
+you before the batch and warns when the request count exceeds the cap.
+
+PeerParley also **paces requests automatically** when a free model is selected
+(18/min, just under the 20 limit). Pacing is strictly cheaper than absorbing
+429s, which cost a round trip, a backoff sleep, and possibly part of the daily
+allowance.
+
+Free models available as of September 2026 include
+`nvidia/nemotron-3-ultra-550b:free`, `nvidia/nemotron-3.5-lightning:free` and
+`thinkingmachines/inkling:free` — all with very large context windows. The
+picker's **Free models only** toggle shows the current list, since the roster
+changes.
+
+**The genuinely free option with no limits at all** is the local one: Ollama or
+LM Studio on your own machine, which also means no student comment ever leaves
+the room. That requires running PeerParley locally rather than on Streamlit
+Cloud — see "Choosing a local model" above.
 
 ### Choosing a local model
 
@@ -364,7 +397,7 @@ grading changes either way.
 | `peerparley/openrouter_catalog.py` | The live OpenRouter catalog (ported from TransQ) |
 | `peerparley/localmodels.py` | Local server probing and model discovery (ported from TransQ) |
 | `peerparley/workspace.py` | Session autosave and the complete `.ppx` bundle format |
-| `tests/test_feedback_ai.py` | 104 offline tests; no API key needed |
+| `tests/test_feedback_ai.py` | 109 offline tests; no API key needed |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to

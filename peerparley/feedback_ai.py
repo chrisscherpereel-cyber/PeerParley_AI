@@ -924,10 +924,17 @@ class BatchAborted(RuntimeError):
         self.drafts: Dict[str, Draft] = drafts or {}
 
 
+def calls_per_student(settings: AISettings) -> int:
+    """One request, or two when the grounding audit runs."""
+    return 2 if settings.verify else 1
+
+
 def make_client(settings: AISettings,
                 on_usage: Optional[Callable] = None) -> LLMClient:
     spec = get_provider(settings.provider)
+    rpm = max(0, int(settings.requests_per_minute or 0))
     return LLMClient(
+        min_interval=(60.0 / rpm) if rpm else 0.0,
         provider=settings.provider,
         model=settings.model,
         api_key=settings.resolved_api_key(),

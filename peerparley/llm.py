@@ -139,6 +139,26 @@ _KEY_PREFIXES = (
 )
 
 
+# OpenRouter's published free-tier limits. Stated here rather than inferred so
+# the UI can do arithmetic against them before spending a batch.
+# https://openrouter.ai/docs/api-reference/limits
+FREE_TIER_RPM = 20
+FREE_TIER_DAILY = 50              # without ever purchasing credits
+FREE_TIER_DAILY_WITH_CREDITS = 1000   # after a one-time purchase of 10+ credits
+
+
+def is_free_model(model: str) -> bool:
+    """Does this slug bill at zero on OpenRouter?
+
+    A slug-level heuristic, matching how OpenRouter names things: the ``:free``
+    suffix and the free router. The catalog knows prices exactly, but this
+    answers the question without a network round trip, which is what the
+    sidebar and the pre-flight estimate need.
+    """
+    slug = (model or "").strip().lower()
+    return slug.endswith(":free") or slug == "openrouter/free"
+
+
 def key_provider_hint(api_key: str) -> Optional[str]:
     """Which provider a key's prefix suggests, or None when it is ambiguous.
 
@@ -193,6 +213,12 @@ class LLMClient:
     on_usage: Optional[Callable[[int, int, Optional[Tuple[float, float]]], None]] = None
     # Overrides the provider's built-in address. Only local servers need this.
     base_url_override: str = ""
+    # Minimum seconds between requests, to stay inside a published rate limit.
+    # OpenRouter's free tier allows 20 requests per minute, and a forty-student
+    # batch fired as fast as the loop can go blows straight through that — the
+    # retries then absorb 429s that never needed to happen. Zero disables it.
+    min_interval: float = 0.0
+    _last_call: float = field(default=0.0, repr=False)
 
     def __post_init__(self) -> None:
         self.spec: Provider = get_provider(self.provider)
@@ -270,9 +296,25 @@ class LLMClient:
             rate = (0.0, 0.0) if self.spec.is_local else PRICING.get(self.model)
             self.on_usage(input_tokens, output_tokens, rate)
 
+    def _throttle(self) -> None:
+        """Wait, if needed, to honour ``min_interval``.
+
+        Pacing beats retrying: a 429 costs a round trip and a backoff sleep that
+        is longer than the wait that would have avoided it, and on a free tier
+        it can also consume part of a daily allowance.
+        """
+        if self.min_interval <= 0:
+            return
+        import time
+        gap = time.monotonic() - self._last_call
+        if self._last_call and gap < self.min_interval:
+            time.sleep(self.min_interval - gap)
+        self._last_call = time.monotonic()
+
     def _complete_once(
         self, system: str, user: str, max_tokens: Optional[int], json_mode: bool
     ) -> str:
+        self._throttle()
         tokens = max_tokens or self.max_tokens
         try:
             if self.spec.sdk == "gemini":

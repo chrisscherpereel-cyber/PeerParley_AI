@@ -89,12 +89,15 @@ PROVIDERS: Dict[str, Provider] = {
         # ones.
         models=(
             FREE_ROUTER,
-            "anthropic/claude-sonnet-4.5",
-            "openai/gpt-4.1",
+            # Free ($0) options, as of September 2026. The live catalog is the
+            # authority — these are only the picker's opening selection.
+            "nvidia/nemotron-3-ultra-550b:free",
+            "nvidia/nemotron-3.5-lightning:free",
+            "thinkingmachines/inkling:free",
+            # Paid, and what to pin for a whole section.
             "openai/gpt-4.1-mini",
+            "anthropic/claude-sonnet-4.5",
             "google/gemini-3.8-flash",
-            "deepseek/deepseek-v4-flash",
-            "x-ai/grok-4.6",
         ),
         base_url="https://openrouter.ai/api/v1",
         # OpenRouter proxies hundreds of models and not all honor
@@ -237,6 +240,7 @@ SETTINGS_FIELDS = (
     "enabled", "provider", "model", "temperature", "max_tokens", "tone",
     "target_words", "verify", "verify_threshold", "local_base_url",
     "include_ratings", "extra_guidance", "retry_truncated",
+    "requests_per_minute",
 )
 
 
@@ -334,6 +338,10 @@ class AISettings:
     # half-written draft. This is the "resubmit to complete" that an instructor
     # would otherwise do by hand, forty times.
     retry_truncated: bool = True
+    # Requests per minute to pace at. 0 = no pacing. Set automatically for free
+    # models, which are the ones with a published per-minute ceiling worth
+    # respecting; pacing costs a few seconds and avoids 429s entirely.
+    requests_per_minute: int = 0
     tone: str = DEFAULT_TONE
     # Roughly how long the narrative should run. Students stop reading long
     # before an instructor stops writing.

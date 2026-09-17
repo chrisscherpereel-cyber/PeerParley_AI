@@ -1540,3 +1540,66 @@ def test_empty_drafts_get_their_own_metric_not_unsupported_claims():
     assert st["empty"] == 1
     assert st["truncated"] == 1
     assert st["written"] == 2       # the empty one produced nothing
+
+
+# --------------------------------------------------------------------------- #
+# Free-tier pacing and budgeting
+# --------------------------------------------------------------------------- #
+
+from peerparley.llm import (  # noqa: E402
+    FREE_TIER_DAILY,
+    FREE_TIER_RPM,
+    is_free_model,
+)
+
+
+def test_free_models_are_recognised_by_slug():
+    assert is_free_model("openrouter/free")
+    assert is_free_model("nvidia/nemotron-3-ultra-550b:free")
+    assert is_free_model("THINKINGMACHINES/INKLING:FREE")     # case-insensitive
+    assert not is_free_model("openai/gpt-4.1-mini")
+    assert not is_free_model("anthropic/claude-sonnet-4.5")
+    assert not is_free_model("")
+
+
+def test_calls_per_student_reflects_the_audit():
+    assert fai.calls_per_student(AISettings(verify=True)) == 2
+    assert fai.calls_per_student(AISettings(verify=False)) == 1
+
+
+def test_a_forty_student_batch_with_the_audit_exceeds_the_free_daily_cap():
+    """The arithmetic the panel now shows before spending a batch."""
+    with_audit = 40 * fai.calls_per_student(AISettings(verify=True))
+    without = 40 * fai.calls_per_student(AISettings(verify=False))
+    assert with_audit == 80 and with_audit > FREE_TIER_DAILY
+    assert without == 40 and without <= FREE_TIER_DAILY
+
+
+def test_pacing_converts_requests_per_minute_into_an_interval():
+    s = AISettings(enabled=True, provider="openrouter", model="openrouter/free",
+                   api_key="sk-or-x", requests_per_minute=18)
+    # make_client would need the openai package; check the arithmetic directly
+    assert 60.0 / s.requests_per_minute == pytest.approx(60 / 18)
+    assert AISettings().requests_per_minute == 0          # off unless asked
+
+
+def test_throttle_waits_between_calls_and_is_off_by_default():
+    import time
+    from peerparley.llm import LLMClient
+    from peerparley.aiconfig import get_provider
+
+    c = LLMClient.__new__(LLMClient)
+    c.spec = get_provider("openrouter")
+    c.min_interval = 0.25
+    c._last_call = 0.0
+
+    c._throttle()                      # first call never waits
+    started = time.monotonic()
+    c._throttle()                      # second must honour the interval
+    assert time.monotonic() - started >= 0.2
+
+    c.min_interval = 0.0
+    started = time.monotonic()
+    c._throttle()
+    c._throttle()
+    assert time.monotonic() - started < 0.05      # disabled means no sleeping

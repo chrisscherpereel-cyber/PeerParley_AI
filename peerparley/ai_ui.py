@@ -31,7 +31,15 @@ from .aiconfig import (
     save_settings,
 )
 from .grading import TeamResult
-from .llm import estimate_cost, has_pricing, register_pricing
+from .llm import (
+    FREE_TIER_DAILY,
+    FREE_TIER_DAILY_WITH_CREDITS,
+    FREE_TIER_RPM,
+    estimate_cost,
+    has_pricing,
+    is_free_model,
+    register_pricing,
+)
 from .openrouter_catalog import (
     ORModel,
     load_models,
@@ -393,6 +401,15 @@ def sidebar_settings(vault=None, username: str = "") -> AISettings:
             line += " · no published price for this model"
         st.caption(line)
 
+    # Free models are the ones with a per-minute ceiling worth respecting, and
+    # pacing is strictly cheaper than absorbing 429s. Set here rather than in
+    # AISettings' default so a paid model is never slowed down for no reason.
+    if s.provider == "openrouter" and is_free_model(s.model):
+        if not s.requests_per_minute:
+            s.requests_per_minute = FREE_TIER_RPM - 2   # a little headroom
+    elif s.requests_per_minute == FREE_TIER_RPM - 2:
+        s.requests_per_minute = 0        # switched to a paid model; stop pacing
+
     ready, why = s.ready()
     if not ready:
         st.info(why)
@@ -595,11 +612,36 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
               "Drafts a narrative for every student."),
     )
     with g3:
+        per = fai.calls_per_student(settings)
         st.caption(
             f"{settings.spec().label} · `{settings.model}` · "
             f"{'with' if settings.verify else 'without'} the grounding audit · "
-            f"{'1' if not settings.verify else '2'} call(s) per student"
+            f"{per} call(s) per student"
         )
+
+        # Free tier has a hard daily ceiling, and a forty-student batch with the
+        # audit on is 80 requests — which silently exceeds it. Better to show
+        # the arithmetic before the batch than to discover it at student 25.
+        if settings.provider == "openrouter" and is_free_model(settings.model):
+            need = len(todo or members) * per
+            if need > FREE_TIER_DAILY:
+                halved = len(todo or members)
+                st.warning(
+                    f"**{need} requests needed, and OpenRouter's free tier "
+                    f"allows {FREE_TIER_DAILY}/day** (rising to "
+                    f"{FREE_TIER_DAILY_WITH_CREDITS:,}/day once an account has "
+                    f"ever purchased 10 credits). "
+                    + (f"Turning the grounding audit off halves this to "
+                       f"{halved}. " if settings.verify else "")
+                    + "Otherwise this batch will stop partway.",
+                    icon="🧮",
+                )
+            else:
+                st.caption(
+                    f"{need} of the free tier's {FREE_TIER_DAILY} daily requests"
+                    + (f" · paced at {settings.requests_per_minute}/min"
+                       if settings.requests_per_minute else "")
+                )
         if done and todo:
             st.caption(f"**{len(done)} done, {len(todo)} to go.** The retry "
                        "button only touches the ones still outstanding.")
