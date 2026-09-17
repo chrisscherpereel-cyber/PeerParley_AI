@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 import streamlit as st
 
 from . import feedback_ai as fai
+from . import safety
 from .aiconfig import (
     AISettings,
     DEFAULT_PROVIDER,
@@ -47,6 +48,8 @@ from .openrouter_catalog import (
     vendors as catalog_vendors,
 )
 from . import localmodels
+from . import model_advisor as advisor
+from .openrouter_catalog import fetch_key_status
 
 STATE_KEY = "ai_drafts"
 SETTINGS_KEY = "ai_settings"
@@ -66,7 +69,14 @@ def _openrouter_catalog(_nonce: int = 0):
     return load_models()
 
 
-def _openrouter_model_picker(default_slug: str) -> str:
+@st.cache_data(ttl=120, show_spinner=False)
+def _key_status(api_key: str, _nonce: int = 0):
+    """Ask OpenRouter about the key. Cached briefly so it isn't re-asked per rerun."""
+    return fetch_key_status(api_key)
+
+
+def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
+                             vault=None, api_key: str = "") -> str:
     """Every model OpenRouter currently carries, A–Z, free ones marked.
 
     Fetched live rather than hardcoded: OpenRouter's roster turns over weekly,
@@ -83,6 +93,60 @@ def _openrouter_model_picker(default_slug: str) -> str:
     if warning:
         st.warning(warning, icon="📶")
 
+    # ---- what the key itself says, before anything is spent -------------
+    if api_key:
+        status = _key_status(api_key, st.session_state.get("ai_key_nonce", 0))
+        if not status.valid:
+            st.error(status.error, icon="🔑")
+        else:
+            bits = ["Key accepted"]
+            if status.free_known:
+                bits.append(
+                    f"{status.free_remaining} of {status.free_limit} free "
+                    f"requests left today")
+            if status.credits_remaining is not None:
+                bits.append(f"{status.credits_remaining:.2f} credits")
+            if status.is_free_tier:
+                bits.append("free tier")
+            st.success(" · ".join(bits), icon="🔑")
+            st.session_state["ai_free_remaining"] = (
+                status.free_remaining if status.free_known else None)
+
+    records = advisor.load_records(vault) if vault is not None else {}
+
+    # ---- recommendations, from capability plus observed history ---------
+    rec = advisor.recommend(list(catalog), reply_tokens=reply_tokens,
+                            records=records)
+    if rec["free"] or rec["paid"]:
+        with st.expander("💡 Recommended for this task", expanded=False):
+            st.caption(
+                "Ranked on what OpenRouter publishes — structured-output "
+                "support and reply ceiling — plus how models have actually "
+                "performed here once there are enough runs to count."
+            )
+            for bucket, label in (("paid", "Best paid"), ("free", "Best free")):
+                a = rec[bucket]
+                if not a:
+                    st.markdown(f"**{label}:** nothing in the catalog qualifies.")
+                    continue
+                st.markdown(f"**{label}:** `{a.model}`")
+                for r in a.reasons:
+                    st.caption(f"　+ {r}")
+                for w in a.warnings:
+                    st.caption(f"　! {w}")
+                if st.button(f"Use {a.model}", key=f"ai_use_{bucket}",
+                             use_container_width=True):
+                    st.session_state["ai_or_model"] = a.model
+                    st.rerun()
+
+    only_usable = st.checkbox(
+        "Only models that can do this job", value=True, key="ai_or_usable",
+        help="Hides models whose published reply ceiling or context window is "
+             "too small for a feedback narrative — they would truncate every "
+             "time. Untick to see the full catalog; the metadata is "
+             "occasionally missing or wrong.",
+    )
+
     free_only = st.checkbox(
         "Free models only", value=False, key="ai_or_free_only",
         help="Models OpenRouter serves at $0. They are rate-limited and often "
@@ -95,8 +159,12 @@ def _openrouter_model_picker(default_slug: str) -> str:
         placeholder="All vendors", key="ai_or_vendors",
     )
 
+    pool = (advisor.usable_only(list(catalog), reply_tokens=reply_tokens,
+                                records=records)
+            if only_usable else list(catalog))
+    hidden = len(catalog) - len(pool)
     shown = [
-        m for m in catalog
+        m for m in pool
         if (not free_only or m.is_free) and (not chosen or m.vendor in chosen)
     ]
     if not shown:
@@ -107,10 +175,11 @@ def _openrouter_model_picker(default_slug: str) -> str:
     labels = {m.id: m.option_label for m in shown}
     index = slugs.index(default_slug) if default_slug in slugs else 0
 
-    free_count = sum(1 for m in catalog if m.is_free)
+    free_count = sum(1 for m in shown if m.is_free)
     st.caption(
         f"{len(shown)} of {len(catalog)} models · {free_count} free · "
-        f"{'bundled snapshot' if warning else 'live from openrouter.ai'}"
+        + (f"{hidden} hidden as unusable · " if hidden else "")
+        + f"{'bundled snapshot' if warning else 'live from openrouter.ai'}"
     )
 
     selected = st.selectbox(
@@ -119,6 +188,16 @@ def _openrouter_model_picker(default_slug: str) -> str:
         key="ai_or_model",
         help="Type to search. Sorted alphabetically; 🆓 marks models priced at $0.",
     )
+
+    picked = next((m for m in catalog if m.id == selected), None)
+    if picked is not None:
+        a = advisor.assess(picked, reply_tokens=reply_tokens,
+                           record=records.get(picked.id))
+        st.markdown(f"{a.icon} **{a.headline()}**")
+        for r in a.reasons:
+            st.caption(f"　+ {r}")
+        for w in a.warnings:
+            st.caption(f"　! {w}")
 
     c1, c2 = st.columns(2)
     if c1.button("↻ Refresh list", use_container_width=True, key="ai_or_refresh"):
@@ -269,7 +348,9 @@ def sidebar_settings(vault=None, username: str = "") -> AISettings:
     # short, stable roster that fits in a dropdown.
     if s.provider == "openrouter":
         seed = s.model if s.model else (spec.models[0] if spec.models else "")
-        s.model = _openrouter_model_picker(seed)
+        s.model = _openrouter_model_picker(
+            seed, reply_tokens=s.max_tokens, vault=vault,
+            api_key=s.resolved_api_key())
     elif spec.is_local:
         s.local_base_url, s.model = _local_model_picker(
             s.local_base_url, s.model if s.provider == "local" else "")
@@ -624,7 +705,23 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         # the arithmetic before the batch than to discover it at student 25.
         if settings.provider == "openrouter" and is_free_model(settings.model):
             need = len(todo or members) * per
-            if need > FREE_TIER_DAILY:
+            # The key check reports today's actual remaining allowance, which
+            # beats assuming a fresh 50 — a second batch on the same day would
+            # otherwise look affordable when it is not.
+            left = st.session_state.get("ai_free_remaining")
+            if isinstance(left, int) and need > left:
+                st.warning(
+                    f"**{need} requests needed, {left} free requests left "
+                    f"today** on this key."
+                    + (f" Turning the grounding audit off halves it to "
+                       f"{len(todo or members)}." if settings.verify else "")
+                    + " A one-time purchase of 10 credits raises the daily "
+                      f"ceiling to {FREE_TIER_DAILY_WITH_CREDITS:,}.",
+                    icon="🧮",
+                )
+            elif isinstance(left, int):
+                st.caption(f"{need} requests · {left} free left today")
+            elif need > FREE_TIER_DAILY:
                 halved = len(todo or members)
                 st.warning(
                     f"**{need} requests needed, and OpenRouter's free tier "
@@ -647,7 +744,15 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                        "button only touches the ones still outstanding.")
 
     targets: Optional[List[str]] = None
-    if run_all:
+    # A single-student regenerate requested from a row below. The button only
+    # records the key; the work happens here, on the next run, so it goes
+    # through exactly the same generate → check → screen → persist path as a
+    # batch rather than a parallel shortcut that could drift from it.
+    regen = st.session_state.pop("ai_regen_key", None)
+    if regen:
+        targets = [regen]
+        st.info(f"Redrafting one student…", icon="↻")
+    elif run_all:
         targets = [m.key for m in members]
     elif run_rest:
         targets = missing + failed
@@ -689,11 +794,16 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         drafts.update(fresh)
         st.session_state[STATE_KEY] = drafts
         stats = fai.batch_stats(fresh)
-        line = (
-            f"{stats['written']} narrative(s) written · {stats['clean']} clean · "
-            f"{stats['flagged']} flagged · {stats['empty']} came back empty · "
-            f"{stats['thin']} too thin to write · {stats['errors']} failed."
-        )
+        if len(fresh) == 1:
+            only = next(iter(fresh.values()))
+            line = f"{only.name}: {only.summary()}"
+        else:
+            line = (
+                f"{stats['written']} narrative(s) written · "
+                f"{stats['clean']} clean · {stats['flagged']} flagged · "
+                f"{stats['empty']} came back empty · "
+                f"{stats['thin']} too thin to write · {stats['errors']} failed."
+            )
         # Not a success when nothing was written. Saying "Drafted 40" over forty
         # failures is how an instructor ends up believing the run worked.
         if stats["written"]:
@@ -702,6 +812,10 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
             st.session_state["ai_last_batch"] = (
                 "error", line + "  No narratives were produced — see below.")
         _persist(vault, slug, drafts, settings, force=True)
+        # Feed this run into the model's track record, so the recommendation
+        # above is built from evidence rather than only from metadata.
+        if vault is not None:
+            advisor.record_batch(vault, settings.model, list(fresh.values()))
         # Rerun so the button labels and counts above are recomputed from the
         # new state. Without this they still show the pre-batch numbers — which
         # is how "Draft the 40 remaining" ended up sitting next to "38 failed".
@@ -848,13 +962,16 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         if only_flagged and (d.clean and not d.error and not d.insufficient_evidence):
             continue
 
-        mark = ("🔴" if d.high_severity else
+        mark = ("🛑" if d.blocked else
+                "🔴" if d.high_severity else
                 "⚠️" if not d.ok else
-                "🟡" if d.flags else
+                "🟡" if d.flags or d.worst_concern == "moderate" else
                 "📭" if d.insufficient_evidence else
                 "✅" if d.approved else "○")
         header = f"{mark} {m.team} · {m.name} — {d.summary()}"
-        with st.expander(header, expanded=bool(d.high_severity) and not d.approved):
+        with st.expander(header,
+                         expanded=(d.blocked or bool(d.high_severity))
+                         and not d.approved):
             if not d.ok:
                 st.error(d.error)
                 if d.raw_partial:
@@ -885,6 +1002,50 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                     "or pin a stronger model than the free router.",
                     icon="⚠️",
                 )
+
+            # ---- language concerns, before anything else ------------------
+            if d.concerns:
+                box = st.error if d.blocked else st.warning
+                box(f"**Language flagged in what would be sent** — "
+                    f"{safety.advice(d.concerns)}",
+                    icon="🛑" if d.blocked else "⚠️")
+                for c in d.concerns:
+                    origin = ("a teammate's comment" if c.where == "comment"
+                              else "the generated summary")
+                    st.markdown(f"{c.icon} **{c.reason}** — in {origin}")
+                    st.caption(f"› {c.text[:300]}")
+
+            # ---- what this student receives -------------------------------
+            dl1, dl2 = st.columns([1.6, 1])
+            with dl1:
+                choices = list(fai.DELIVERY_CHOICES)
+                current = d.delivery if d.delivery in choices else ""
+                picked = st.selectbox(
+                    "What this student receives",
+                    choices, index=choices.index(current),
+                    format_func=lambda c: fai.DELIVERY_LABELS[c],
+                    key=f"ai_delivery_{m.key}",
+                    help="Overrides the survey-wide setting for this student "
+                         "only. Useful when one student's comments contain "
+                         "something that should not be forwarded.",
+                )
+                d.delivery = picked
+                if picked == "summary" and not (d.approved and d.text().strip()):
+                    st.caption("⚠️ Summary-only, but nothing is approved yet — "
+                               "as it stands this student would receive no "
+                               "written feedback.")
+                elif picked == "comments":
+                    st.caption("Their teammates' words as written. The summary "
+                               "is not sent, approved or not.")
+                elif picked == "none":
+                    st.caption("Numbers only for this student.")
+            with dl2:
+                if st.button("↻ Regenerate", key=f"ai_regen_{m.key}",
+                             use_container_width=True,
+                             help="Redraft this student alone. Discards the "
+                                  "current draft along with any edits and the "
+                                  "approval on it."):
+                    st.session_state["ai_regen_key"] = m.key
 
             left, right = st.columns([1.15, 1])
             with left:

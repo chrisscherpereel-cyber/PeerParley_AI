@@ -48,7 +48,8 @@ def _email_for(m: StudentResult, roster: Optional[Roster]) -> str:
 def build_messages(teams: List[TeamResult], roster: Optional[Roster],
                    subject_t: str, body_t: str, attach_team: bool,
                    course: str, eval_no: str, report: dict = None,
-                   narratives: Optional[Dict[str, str]] = None) -> List[mail.Message]:
+                   narratives: Optional[Dict[str, str]] = None,
+                   reports: Optional[Dict[str, dict]] = None) -> List[mail.Message]:
     """Build one email per student, attaching their feedback PDF (built with the
     instructor's `report` display settings) and optionally the team PDF.
 
@@ -58,6 +59,9 @@ def build_messages(teams: List[TeamResult], roster: Optional[Roster],
     draft nobody signed off on.
     """
     narratives = narratives or {}
+    # `reports` holds per-student overrides of what the report shows, set during
+    # review. A student who isn't in it gets the survey-wide `report`.
+    reports = reports or {}
     messages: List[mail.Message] = []
     team_pdf_cache: Dict[str, bytes] = {}
     for t in teams:
@@ -69,7 +73,7 @@ def build_messages(teams: List[TeamResult], roster: Optional[Roster],
             atts = [mail.Attachment(
                 f"{safe}_feedback.pdf",
                 pdfgen.build_individual_pdf(
-                    m, eval_no, course, report=report,
+                    m, eval_no, course, report=reports.get(m.key, report),
                     narrative=narratives.get(m.key, "")))]
             if attach_team:
                 atts.append(mail.Attachment(

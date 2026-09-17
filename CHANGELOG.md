@@ -1,5 +1,120 @@
 # Changelog
 
+## 2.8.0 — per-student delivery, one-student regenerate, and an abuse screen
+
+### The delivery decision moves into review
+
+The survey-wide setting is the right starting point and the wrong place to
+finish: a cohort-wide rule cannot know that *one* student's comments contain
+something that should not be forwarded. Each draft now has **What this student
+receives** — default, summary and comments, summary only, comments only, or
+nothing — overriding it for that student alone.
+
+`feedback_ai.report_overrides` turns those choices into per-student report
+flags, threaded through every delivery path (PDF zip, preview, direct send,
+`.eml` pack, auto-send pack), so switching send method still cannot change what
+a student gets.
+
+The approval gate is untouched. Summary-only with nothing approved means no
+written feedback, and the panel says so at the point of choosing rather than
+letting it be discovered later. Comments-only suppresses the narrative whether
+or not it was approved — the choice beats the approval, which is the right
+precedence.
+
+### Regenerate one student
+
+**↻ Regenerate** on any draft redrafts that student alone, discarding their
+draft, edits and approval. It routes through the same generate → check → screen
+path as a batch rather than a parallel shortcut, so a regenerated draft is never
+held to a lower standard.
+
+### Abusive language is screened
+
+Peer evaluation invites anonymous criticism, and anonymity occasionally produces
+something that is not criticism. An abusive remark previously had a clear path
+from one student to another with nobody in between.
+
+- **`peerparley/safety.py`** — a local, deterministic screen. No API call,
+  always runs, covers profanity, slurs, threats and direct personal attacks.
+- **The grounding audit also flags abuse**, at no extra cost, catching what a
+  word list cannot: contempt in clean language, "shouldn't be in this major".
+- **Both surfaces**, and the raw comments matter more than the narrative — they
+  are unedited, and in comments-only mode they are the whole report. A student
+  with too few comments to draft from still gets their comments screened, which
+  a narrative-only screen would have missed entirely.
+- **Severity suggests, it does not act.** Severe (slurs, threats, harassment)
+  blocks bulk approval and proposes summary-only for that student — which is
+  exactly what the override above is for. Moderate is the instructor's call.
+  Mild is noted only, because "he contributed nothing" may be the honest and
+  useful truth and flagging it as abuse would make the flag meaningless.
+- **Nothing is censored automatically.** Quietly deleting a teammate's blunt but
+  genuine criticism would be its own failure. `EXTRA_PATTERNS` lets an
+  institution add its own vocabulary.
+
+Neither screen is a guarantee — a word list is evadable and blind to tone, a
+model is inconsistent — and the docs say so. They direct attention; the
+instructor is the control.
+
+17 new tests (141 total) and 11 new end-to-end checks (80 total).
+
+## 2.7.0 — know before you spend, and choose what students receive
+
+Three requests, all of which pointed at the same gap: the app knew nothing about
+a model before committing a whole section to it.
+
+### The key is checked first
+
+`GET /api/v1/key` verifies the credential and reports today's remaining free
+allowance (`free_model_daily_requests`). A rejected key is caught before a batch
+rather than as forty identical 401s, and the budget line now uses the actual
+remaining count instead of assuming a fresh 50 — a second batch on the same day
+used to look affordable when it wasn't.
+
+### Models are assessed on published capability
+
+`ORModel` now parses `supported_parameters` and
+`top_provider.max_completion_tokens`, and `peerparley/model_advisor.py` turns
+them into a verdict: **✅ Should handle this**, **⚠️ Might struggle**, or
+**🚫 Cannot do this job**, with reasons. A reply ceiling under ~2,000 tokens is
+disqualifying — that is exactly the failure that cost 7,233 characters. No
+declared structured-output support is a warning rather than a ban, because
+salvage exists.
+
+**Only models that can do this job** filters the picker, on by default and
+switchable off, since the metadata is occasionally missing or wrong.
+
+### A track record, reported honestly
+
+Outcomes are recorded per model across runs — attempts, usable drafts, empty
+replies, truncations, failures — and fed back into selection.
+
+- **A rate is withheld below 5 attempts.** One success out of one is not 100%,
+  and saying so would be the most misleading thing here; counts are shown
+  instead.
+- Observed performance is scored **against a baseline** rather than added to the
+  score. Adding it meant a model with a 5% success rate outranked an untried
+  one, which is backwards: a demonstrated failure is worse news than no news.
+- There is deliberately **no blended "probability of success"**. It would look
+  authoritative while resting on an invented weighting between capability and
+  history.
+
+### Recommendations, paid and free
+
+**💡 Recommended for this task** names one of each, with reasons and a
+select button. Ties break toward the cheaper model. The free router is never
+recommended — it picks a different model per call, so advising it advises a
+lottery.
+
+### What students receive is now a choice
+
+**Written feedback** under the report settings: summary *and* comments (the
+default), summary only, comments only, or neither. The approval gate holds in
+every mode — "summary only" never ships an unapproved draft; a student without
+one simply gets no written feedback, which is the honest cost of that choice and
+is stated in the UI.
+
+15 new tests (124 total).
+
 ## 2.6.0 — the free tier, made workable
 
 Prompted by a direct question: is there a free OpenRouter option that works for

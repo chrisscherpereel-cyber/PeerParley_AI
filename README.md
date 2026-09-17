@@ -105,8 +105,8 @@ sidebar, then switch it on there. Full guide: **`docs/AI_FEEDBACK.md`**.
 ### Tests
 
 ```bash
-python3 -m pytest tests/ -q     # 109 unit tests, fully offline
-python3 qa_regression.py        # 69 end-to-end checks via Streamlit AppTest
+python3 -m pytest tests/ -q     # 141 unit tests, fully offline
+python3 qa_regression.py        # 80 end-to-end checks via Streamlit AppTest
 ```
 
 ## Deploy to Streamlit Cloud
@@ -154,10 +154,12 @@ See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
 │   ├── openrouter_catalog.py  # v2: live OpenRouter model list (from TransQ)
 │   ├── localmodels.py         # v2: local server probe + model discovery (from TransQ)
 │   ├── workspace.py           # v2: session autosave + complete .ppx bundles
+│   ├── model_advisor.py       # v2: model verdicts, recommendations, track record
+│   ├── safety.py              # v2: abusive-language screen for comments + summaries
 │   └── ai_ui.py               # v2: sidebar settings, model pickers, review panel
 ├── tests/
-│   └── test_feedback_ai.py    # 109 offline tests; no API key needed
-├── qa_regression.py           # headless AppTest harness (69 checks)
+│   └── test_feedback_ai.py    # 141 offline tests; no API key needed
+├── qa_regression.py           # headless AppTest harness (80 checks)
 ├── docs/
 │   └── AI_FEEDBACK.md         # the AI writer: rules, setup, cost, audit trail
 ├── GRADING.md

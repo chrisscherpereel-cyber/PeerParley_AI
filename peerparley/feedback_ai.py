@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import ai_prompts
+from . import safety
 from .aiconfig import AISettings, get_provider
 from .grading import StudentResult, TeamResult
 from .llm import (
@@ -274,6 +275,16 @@ class Draft:
     # Instructor state. `edited` holds their rewrite; empty means "as generated".
     edited: str = ""
     approved: bool = False
+    # Per-student override of what this student receives, decided in review:
+    # "" follows the survey-wide setting, otherwise "both" | "summary" |
+    # "comments" | "none". A global default is the right starting point, but the
+    # decision that matters is often per student — a cohort-wide rule cannot
+    # know that one student's comments contain something that should not be
+    # forwarded.
+    delivery: str = ""
+    # Language findings from the local screen and the audit, on the comments as
+    # well as on the narrative.
+    concerns: List[safety.Concern] = field(default_factory=list)
 
     # Bookkeeping
     model: str = ""
@@ -294,6 +305,20 @@ class Draft:
         return not self.error
 
     @property
+    def worst_concern(self) -> str:
+        return safety.worst(self.concerns)
+
+    @property
+    def blocked(self) -> bool:
+        """Something here should not reach a student as written."""
+        return safety.blocks_release(self.concerns)
+
+    @property
+    def comment_concerns(self) -> List[safety.Concern]:
+        """Findings in what a teammate wrote, as opposed to in the narrative."""
+        return [c for c in self.concerns if c.where == "comment"]
+
+    @property
     def high_severity(self) -> List[Flag]:
         return [f for f in self.flags if f.severity == "high"]
 
@@ -307,7 +332,10 @@ class Draft:
         unaudited one, and the bulk-approve action must not treat the two alike.
         """
         return (self.ok and not self.flags and self.score >= 0.999
-                and not self.empty)
+                and not self.empty
+                # A language concern is never swept up by bulk approval: the
+                # whole point of raising it is that a human reads it.
+                and self.worst_concern in ("", "mild"))
 
     def text(self) -> str:
         """The narrative as it would appear in the PDF."""
@@ -341,6 +369,10 @@ class Draft:
             return f"⚠ {self.error[:80]}"
         if self.insufficient_evidence:
             return "Not enough comments to write from"
+        if self.blocked:
+            where = ("a teammate's comment" if self.comment_concerns
+                     else "the summary")
+            return f"🛑 abusive language in {where} — read before sending"
         if self.empty:
             return ("⚠ came back empty — retry this student"
                     + (" (partial text kept below)" if self.raw_partial else ""))
@@ -364,6 +396,8 @@ class Draft:
             "flags": [f.to_dict() for f in self.flags],
             "verified": self.verified, "quotes_checked": self.quotes_checked,
             "edited": self.edited, "approved": self.approved,
+            "delivery": self.delivery,
+            "concerns": [c.to_dict() for c in self.concerns],
             "model": self.model, "provider": self.provider,
             "error": self.error, "truncated": self.truncated,
             "raw_partial": self.raw_partial,
@@ -403,6 +437,10 @@ class Draft:
             quotes_checked=bool(d.get("quotes_checked", False)),
             edited=str(d.get("edited", "") or ""),
             approved=bool(d.get("approved", False)),
+            delivery=str(d.get("delivery", "") or ""),
+            concerns=[safety.Concern.from_dict(c)
+                      for c in (d.get("concerns") or [])
+                      if isinstance(c, dict)],
             model=str(d.get("model", "") or ""),
             provider=str(d.get("provider", "") or ""),
             error=str(d.get("error", "") or ""),
@@ -582,7 +620,7 @@ def generate_draft(
 ) -> Draft:
     """One student: generate, check citations, optionally audit."""
     if not src.has_material():
-        return Draft(
+        thin = Draft(
             key=src.key, name=src.name, team=src.team,
             insufficient_evidence=(
                 f"Only {src.comment_count} written comment(s) were submitted for "
@@ -591,6 +629,10 @@ def generate_draft(
             ),
             model=settings.model, provider=settings.provider,
         )
+        # No narrative, but the raw comments still reach the student, so they
+        # still get screened. This is the case a narrative-only screen misses.
+        screen_language(thin, src)
+        return thin
 
     system = ai_prompts.narrative_system(settings.tone)
     user = build_user_prompt(src, settings)
@@ -688,6 +730,7 @@ def generate_draft(
         ))
 
     check_quotes(draft, src)
+    screen_language(draft, src)
 
     if draft.empty:
         # The call succeeded and produced nothing. Flag it explicitly rather
@@ -710,6 +753,20 @@ def generate_draft(
         draft.score = 1.0 if not draft.flags else 0.5
 
     return draft
+
+
+def screen_language(draft: Draft, src: FeedbackSource) -> None:
+    """Run the local language screen over both surfaces, in place. No API call.
+
+    Both, because the teammates' own words are forwarded to the student
+    alongside (or instead of) the narrative — and they are the likelier problem,
+    being unedited. A screen that only read generated text would be looking in
+    the safer place.
+    """
+    draft.concerns = [
+        *safety.screen_many(src.comments, where="comment"),
+        *safety.screen(draft.text(), where="narrative"),
+    ]
 
 
 def _failed(src: FeedbackSource, settings: AISettings, message: str,
@@ -784,6 +841,25 @@ def verify_draft(client: LLMClient, draft: Draft, src: FeedbackSource) -> None:
             problem=problem,
             severity="high" if severity not in ("low", "medium") else "low",
             origin="verifier",
+        ))
+
+    # The audit reads context, so it catches contempt the word list cannot —
+    # and it costs nothing extra, being the same call.
+    for item in payload.get("abusive") or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "") or "").strip()
+        reason = str(item.get("reason", "") or "abusive language").strip()
+        if not text and not reason:
+            continue
+        severity = str(item.get("severity", "moderate") or "moderate").lower()
+        if severity not in ("severe", "moderate", "mild"):
+            severity = "moderate"
+        where = str(item.get("where", "narrative") or "narrative").lower()
+        draft.concerns.append(safety.Concern(
+            text=text or "(unspecified passage)", reason=reason,
+            severity=severity,
+            where="comment" if where == "comment" else "narrative",
         ))
 
     try:
@@ -1057,6 +1133,56 @@ def error_groups(drafts: Dict[str, Draft]) -> List[Tuple[str, List[str]]]:
     return sorted(buckets.items(), key=lambda kv: -len(kv[1]))
 
 
+DELIVERY_CHOICES = ("", "both", "summary", "comments", "none")
+
+DELIVERY_LABELS = {
+    "": "Use the survey default",
+    "both": "Summary and their teammates' comments",
+    "summary": "Summary only",
+    "comments": "Their teammates' comments only",
+    "none": "No written feedback",
+}
+
+
+def report_overrides(drafts: Dict[str, Draft],
+                     base_report: Optional[Dict[str, Any]] = None
+                     ) -> Dict[str, Dict[str, Any]]:
+    """Per-student report flags for anyone who overrode the survey default.
+
+    Returns only the students who chose something, so every delivery path can
+    do ``reports.get(key, base_report)`` and be correct for both cases.
+    """
+    base = dict(base_report or {})
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, d in (drafts or {}).items():
+        choice = (d.delivery or "").strip()
+        if choice not in ("both", "summary", "comments", "none"):
+            continue
+        flags = dict(base)
+        flags["narrative"] = choice in ("both", "summary")
+        show_raw = choice in ("both", "comments")
+        flags["valued"] = show_raw
+        flags["focus"] = show_raw
+        out[key] = flags
+    return out
+
+
+def delivery_summary(drafts: Dict[str, Draft], base_report: Optional[Dict] = None
+                     ) -> Dict[str, int]:
+    """How many students are set to receive what. For the review header."""
+    base = dict(base_report or {})
+    base_narr = bool(base.get("narrative", True))
+    base_raw = bool(base.get("valued", True)) or bool(base.get("focus", True))
+    default_mode = ("both" if base_narr and base_raw else
+                    "summary" if base_narr else
+                    "comments" if base_raw else "none")
+    counts = {"both": 0, "summary": 0, "comments": 0, "none": 0}
+    for d in (drafts or {}).values():
+        choice = (d.delivery or "").strip() or default_mode
+        counts[choice] = counts.get(choice, 0) + 1
+    return counts
+
+
 def batch_stats(drafts: Dict[str, Draft]) -> Dict[str, Any]:
     """Counts for the review header."""
     values = list((drafts or {}).values())
@@ -1081,5 +1207,8 @@ def batch_stats(drafts: Dict[str, Draft]) -> Dict[str, Any]:
         "errors": sum(1 for d in values if not d.ok),
         "thin": sum(1 for d in values if d.insufficient_evidence),
         "truncated": sum(1 for d in values if d.ok and d.truncated),
+        "blocked": sum(1 for d in values if d.blocked),
+        "flagged_language": sum(1 for d in values
+                                if d.worst_concern in ("severe", "moderate")),
         "usage": usage,
     }

@@ -438,6 +438,57 @@ _lstate, _lnote = pws.read_bundle(_legacy.getvalue())
 check("legacy bundles still load", len(_lstate["long_df"]) == len(long_df))
 check("and say what they could not carry", "responses only" in _lnote)
 
+# --------------------------------------------------------------------------- #
+# Language screening and per-student delivery
+# --------------------------------------------------------------------------- #
+from peerparley import safety as psafety  # noqa: E402
+
+check("ordinary criticism is not flagged",
+      psafety.screen("She could speak up more in meetings.") == [])
+check("blunt criticism is noted, not blocked",
+      psafety.worst(psafety.screen("He contributed nothing.")) == "mild")
+check("insults are flagged",
+      psafety.worst(psafety.screen("what a useless idiot")) == "moderate")
+check("threats block release",
+      psafety.blocks_release(psafety.screen("kys")))
+check("advice names the per-student remedy",
+      "Summary only" in psafety.advice(psafety.screen("kys", where="comment")))
+
+# Reuse a real computed student from the harness's own teams, then attach
+# comments one of which is abusive.
+_abusive = teams[0].members[0]
+_abusive.contributions = ["He is a useless idiot.", "Did the modelling well."]
+_abusive.improvements = ["Communicate earlier."]
+_src = fai.build_source(_abusive)
+_d = fai.Draft(key=_abusive.key, name=_abusive.name, team=_abusive.team,
+               strengths="Teammates valued the modelling.")
+fai.screen_language(_d, _src)
+check("comments are screened, not just the narrative",
+      bool(_d.comment_concerns))
+check("a flagged draft cannot be bulk-approved", not _d.clean)
+
+_base = {"narrative": True, "valued": True, "focus": True}
+_d.delivery = "summary"
+_ov = fai.report_overrides({_abusive.key: _d}, _base)
+check("a per-student override suppresses the raw comments",
+      _ov[_abusive.key]["valued"] is False and _ov[_abusive.key]["narrative"] is True)
+check("students without an override keep the survey default",
+      "someone-else" not in fai.report_overrides({_abusive.key: _d}, _base))
+
+_d.delivery = "comments"
+check("comments-only suppresses even an approved narrative",
+      fai.report_overrides({_abusive.key: _d}, _base)[_abusive.key]["narrative"] is False)
+
+_pdf_both = pdfgen.build_individual_pdf(_abusive, "1", "QA101", report=_base,
+                                        narrative="A summary sentence here.")
+_d.delivery = "summary"
+_pdf_sum = pdfgen.build_individual_pdf(
+    _abusive, "1", "QA101",
+    report=fai.report_overrides({_abusive.key: _d}, _base)[_abusive.key],
+    narrative="A summary sentence here.")
+check("the override actually changes that student's PDF",
+      len(_pdf_both) > len(_pdf_sum))
+
 print("\n== SUMMARY ==")
 passed = sum(1 for _, ok in results if ok)
 print(f"{passed}/{len(results)} checks passed")

@@ -179,6 +179,67 @@ LM Studio on your own machine, which also means no student comment ever leaves
 the room. That requires running PeerParley locally rather than on Streamlit
 Cloud — see "Choosing a local model" above.
 
+### Knowing whether a model can do the job, before paying to find out
+
+Two things are checked up front, and they are kept separate on purpose.
+
+**Your key.** `GET /api/v1/key` verifies the credential and reports how much of
+today's free allowance is left. A rejected key is caught here rather than as
+forty identical 401s, and the panel's budget line uses your *actual* remaining
+requests rather than assuming a fresh 50.
+
+**The model's declared capability**, from OpenRouter's catalog:
+
+| Signal | Why it matters here |
+|---|---|
+| `structured_outputs` in `supported_parameters` | This task returns a JSON object. Models that don't advertise it have their JSON salvaged from prose, which is the commonest cause of an empty draft. |
+| `top_provider.max_completion_tokens` | A ceiling below ~2,000 tokens truncates every narrative. This is precisely the failure that cost 7,233 characters in a live run. |
+| `context_length` | Rarely a constraint — the prompt is small — but the genuinely tiny are excluded. |
+| Price | Free means rate-limited and counted against the daily cap. |
+
+These produce a verdict — **✅ Should handle this**, **⚠️ Might struggle**, or
+**🚫 Cannot do this job** — with its reasons listed. **Only models that can do
+this job** (on by default) hides the hopeless ones; untick it to see everything,
+since published metadata is occasionally missing or wrong.
+
+One caveat OpenRouter documents itself: `supported_parameters` is the union
+across every provider serving a model, and only some providers may honour
+structured outputs. So it raises confidence rather than guaranteeing anything —
+which is why the generator still asks for JSON in the prompt and salvages the
+reply either way.
+
+### Track record — the only real probability
+
+PeerParley records what actually happened, per model, across your runs:
+attempts, usable drafts, empty replies, truncations, failures. That produces a
+real rate, always shown with its sample size:
+
+> `weak/rambler:free` — 5% of 40 attempts produced a draft · 20 came back empty
+
+**A rate is withheld until there are at least 5 attempts.** One success out of
+one attempt is not a 100% success rate, and reporting it as one would be the
+most misleading thing this feature could do; below the threshold you get counts
+instead.
+
+Observed performance is scored against a baseline rather than simply added, so a
+model with a demonstrated failure rate ranks *below* one that has never been
+tried. Evidence should beat metadata, including when the evidence is bad.
+
+There is deliberately **no single blended "probability of success"** percentage.
+That number would look authoritative while resting on an invented weighting
+between declared capability and observed history. "Supports JSON, 32k ceiling,
+and 9 of 10 landed last time" tells you more than "87%" and doesn't pretend.
+
+### Recommendations
+
+**💡 Recommended for this task** names a best **paid** and a best **free**
+option, with reasons, and a button to select either. Two answers rather than
+one, because choosing between them is a budget decision and not a technical
+one. Ties break toward the cheaper model.
+
+The free router (`openrouter/free`) is never recommended — it picks a different
+model per call, so advising it would be advising a lottery. It stays selectable.
+
 ### Choosing a local model
 
 The list comes from the server itself — what's offered is what you've actually
@@ -241,6 +302,91 @@ local models show an exact `$0.00`.
 
 Rough order of magnitude for a 30-student section with the audit on (60 calls):
 a few cents on a mini/flash model, well under a dollar on a frontier one.
+
+## What each student receives
+
+Under **① Set up survey → What students see in their feedback report**, the
+**Written feedback** choice controls the words a student gets:
+
+| Choice | What's in the PDF |
+|---|---|
+| **Summary and their teammates' comments** (default) | The narrative sits above the bullets it was written from, so a student can check it against what was actually said. |
+| **Summary only** | Cleaner, and it spares students the blunter phrasings. The trade: they can't check it against the source, so it rests entirely on your review — and a student with no approved draft gets no written feedback at all. |
+| **Their teammates' comments only** | Their own words, unedited. What PeerParley sent before the AI writer existed. |
+| **No written feedback** | Numbers only. |
+
+The approval gate holds in every mode. Choosing "summary only" never causes an
+unapproved draft to be sent — a student without one simply receives no written
+feedback, which is why the default keeps the bullets alongside.
+
+Fine-grained checkboxes for each section remain available underneath.
+
+### Overriding it per student, during review
+
+The survey-wide choice is the starting point; the decision that matters is
+often about one student. Each draft in the review panel has **What this student
+receives** — use the survey default, summary and comments, summary only,
+comments only, or nothing — overriding the default for that student alone.
+
+This exists because a cohort-wide rule cannot know that one student's comments
+contain something that should not be forwarded. That is the remedy the language
+screen below points at.
+
+The approval gate is unaffected. Summary-only with nothing approved means the
+student receives no written feedback, and the panel says so where you pick it
+rather than letting you find out later. Comments-only suppresses the narrative
+whether or not it was approved.
+
+### Regenerating one student
+
+**↻ Regenerate** on any draft redrafts that student alone. It discards their
+current draft, edits and approval, and runs the same generate → check → screen
+path as a batch, so a regenerated draft is never held to a lower standard than
+a batch one.
+
+## Screening for abusive language
+
+Peer evaluation invites anonymous criticism of a classmate, and anonymity
+occasionally produces something that is not criticism. Before this existed, an
+abusive remark had a clear path from one student to another with nobody in
+between.
+
+**Both surfaces are screened**, and the raw comments matter more than the
+narrative: they are a teammate's unedited words, and in comments-only mode they
+are the whole report. A screen that only read generated text would be looking in
+the safer place.
+
+**Two screens, in order of reliability:**
+
+1. **A local pass** (`peerparley/safety.py`) — no API call, always runs. Catches
+   unambiguous profanity, slurs, threats and direct personal attacks. Cheap and
+   dumb.
+2. **The grounding audit**, when on, is also asked to flag abusive language. It
+   reads context, so it catches what a word list cannot — contempt in clean
+   language, "she shouldn't be in this major", a sneer with no profanity in it.
+   This costs nothing extra; it is the same call.
+
+**Severity decides what's suggested, not what happens:**
+
+| | Examples | Effect |
+|---|---|---|
+| 🛑 **Severe** | Slurs, threats, sexual harassment | Should not reach a student. The panel proposes summary-only for that student. |
+| ⚠️ **Moderate** | Profanity, "a useless idiot", "shouldn't be in this major" | Your call — often worth rewording rather than removing. |
+| • **Mild** | "lazy", "did nothing", "never showed up" | Noted only. |
+
+Mild findings are deliberately not treated as problems: *"he contributed
+nothing"* may be the honest and useful truth about a project, and flagging it as
+abuse would make the flag meaningless.
+
+**Nothing is ever censored automatically.** A flag is raised, bulk approval is
+blocked, and you decide. Silently deleting a teammate's blunt-but-genuine
+criticism would be its own failure, and a system that quietly edited peer
+feedback would be worse than one that asks.
+
+**Neither screen is a guarantee.** A word list is trivially evaded and blind to
+tone; a model is inconsistent. They exist to direct your attention, which is the
+only real control. An institution with its own conduct vocabulary can extend
+`safety.EXTRA_PATTERNS` without touching the logic.
 
 ## Cut-off and empty replies
 
@@ -397,7 +543,9 @@ grading changes either way.
 | `peerparley/openrouter_catalog.py` | The live OpenRouter catalog (ported from TransQ) |
 | `peerparley/localmodels.py` | Local server probing and model discovery (ported from TransQ) |
 | `peerparley/workspace.py` | Session autosave and the complete `.ppx` bundle format |
-| `tests/test_feedback_ai.py` | 109 offline tests; no API key needed |
+| `peerparley/model_advisor.py` | Model suitability verdicts, recommendations, track record |
+| `peerparley/safety.py` | Local screen for abusive language in comments and summaries |
+| `tests/test_feedback_ai.py` | 141 offline tests; no API key needed |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to

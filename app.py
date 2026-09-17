@@ -219,7 +219,7 @@ with st.sidebar:
                    # Reset the persistence bookkeeping too, so the new survey's
                    # saved drafts are restored rather than the old survey's
                    # fingerprint suppressing the load.
-                   ai_ui.FP_KEY, ai_ui.LOADED_KEY):
+                   ai_ui.FP_KEY, ai_ui.LOADED_KEY, "ai_reports"):
             S.pop(_k, None)
         S["_nav_token"] = S.get("_nav_token", 0) + 1
     S["_active_slug"] = _active_slug
@@ -435,26 +435,29 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
 
 
 def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_no,
-                      report, narratives=None):
+                      report, narratives=None, reports=None):
     """One dropdown for how to send the feedback (results, with PDF attachments).
 
     `narratives` carries the approved AI summaries (v2) into every delivery path,
     so switching send method cannot change what a student receives.
     """
     narratives = narratives or {}
+    reports = reports or {}
     m = st.selectbox("How do you want to send the feedback?", _RESULT_METHODS, key=f"{key}_m")
     if m.startswith(("Microsoft", "SMTP")):
         api, drafts = _api_and_drafts(m, key)
         if st.button("Send now", type="primary", key=f"{key}_go"):
             msgs = _build_messages(teams, roster, subj, body, attach_team, course, eval_no,
-                                   report=report, narratives=narratives)
+                                   report=report, narratives=narratives,
+                                   reports=reports)
             _deliver(msgs, api, drafts, ok_label="Feedback delivered")
     elif m.startswith("Download .eml"):
         if st.button("Build .eml files", key=f"{key}_eml"):
             st.session_state[f"{key}_emlzip"] = emailpack.zip_folders({"Results":
                 emailpack.results_items(teams, roster, subj, body, attach_team,
                                         course, eval_no, report=report,
-                                        narratives=narratives)})
+                                        narratives=narratives,
+                                        reports=reports)})
         if st.session_state.get(f"{key}_emlzip"):
             st.download_button("⬇ Download .eml zip", st.session_state[f"{key}_emlzip"],
                                "results_eml.zip", "application/zip")
@@ -463,7 +466,8 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
             st.session_state[f"{key}_autozip"] = emailpack.send_all_pack(
                 emailpack.results_parts(teams, roster, subj, body, attach_team,
                                         course, eval_no, report=report,
-                                        narratives=narratives), "Results")
+                                        narratives=narratives,
+                                        reports=reports), "Results")
         if st.session_state.get(f"{key}_autozip"):
             st.download_button("⬇ Download auto-send zip", st.session_state[f"{key}_autozip"],
                                "results_autosend.zip", "application/zip")
@@ -743,18 +747,67 @@ with tabs[0]:
         rp["dimensions"] = st.checkbox("Rating meters + dimension letter grades",
                                        value=rp.get("dimensions", True))
         rp["pay_grade"] = st.checkbox("Pay grade", value=rp.get("pay_grade", True))
-        rp["valued"] = st.checkbox("“What your teammates valued” (contributions)",
-                                   value=rp.get("valued", True))
-        rp["focus"] = st.checkbox("“Where to focus next” (improvements)",
-                                  value=rp.get("focus", True))
         rp["response_quality"] = st.checkbox("“The feedback you gave” (your Q + points)",
                                              value=rp.get("response_quality", True))
-        rp["narrative"] = st.checkbox(
-            "“Summary of your peer feedback” (AI narrative, when approved)",
-            value=rp.get("narrative", True),
-            help="Only appears for students whose draft you approved on the "
-                 "④ Results tab. Unticking this hides it even for approved "
-                 "drafts; the raw comment bullets are unaffected.")
+
+        # ---- written feedback: narrative, raw comments, or both ----------
+        st.markdown("###### Written feedback")
+        st.caption("What each student receives in words. The AI narrative only "
+                   "appears for students whose draft you approved on the "
+                   "④ Results tab.")
+        _WF_BOTH = "Summary **and** their teammates' comments"
+        _WF_SUMMARY = "Summary only"
+        _WF_RAW = "Their teammates' comments only"
+        _WF_NONE = "No written feedback"
+
+        def _written_mode(flags):
+            narr = flags.get("narrative", True)
+            raw = flags.get("valued", True) or flags.get("focus", True)
+            if narr and raw:
+                return _WF_BOTH
+            if narr:
+                return _WF_SUMMARY
+            if raw:
+                return _WF_RAW
+            return _WF_NONE
+
+        _wf = st.radio(
+            "Written feedback", [_WF_BOTH, _WF_SUMMARY, _WF_RAW, _WF_NONE],
+            index=[_WF_BOTH, _WF_SUMMARY, _WF_RAW, _WF_NONE].index(
+                _written_mode(rp)),
+            label_visibility="collapsed", key="report_written_mode")
+
+        if _wf == _WF_BOTH:
+            rp["narrative"], rp["valued"], rp["focus"] = True, True, True
+            st.caption("The summary sits above the bullets it was written from, "
+                       "so a student can check it against what was actually said.")
+        elif _wf == _WF_SUMMARY:
+            rp["narrative"], rp["valued"], rp["focus"] = True, False, False
+            st.caption(
+                "Cleaner to read, and it spares students the blunter phrasings. "
+                "Worth knowing the trade: they cannot check the summary against "
+                "the source, so it rests entirely on your review of it — and a "
+                "student who received no approved draft gets no written "
+                "feedback at all.")
+        elif _wf == _WF_RAW:
+            rp["narrative"], rp["valued"], rp["focus"] = False, True, True
+            st.caption("Their teammates' own words, unedited. This is what "
+                       "PeerParley sent before the AI writer existed.")
+        else:
+            rp["narrative"], rp["valued"], rp["focus"] = False, False, False
+            st.caption("Numbers only — no comments and no summary.")
+
+        with st.expander("Fine-grained control"):
+            rp["valued"] = st.checkbox(
+                "“What your teammates valued” (contributions)",
+                value=rp.get("valued", True), key="report_valued")
+            rp["focus"] = st.checkbox(
+                "“Where to focus next” (improvements)",
+                value=rp.get("focus", True), key="report_focus")
+            rp["narrative"] = st.checkbox(
+                "“Summary of your peer feedback” (AI narrative, when approved)",
+                value=rp.get("narrative", True), key="report_narrative")
+
         cur["report"] = rp
 
     cur["is_open"] = st.toggle("Accept submissions (master switch)", value=cur["is_open"],
@@ -1031,6 +1084,12 @@ with tabs[3]:
             # state rather than a module global so the survey-switch guard above
             # can clear it.
             S["ai_narratives"] = narratives
+            # Per-student delivery choices made during review. Computed here so
+            # every path below — zip, preview, email, .eml, auto-send — reads
+            # the same decisions.
+            from peerparley import feedback_ai as _fai
+            ai_reports = _fai.report_overrides(S.get(ai_ui.STATE_KEY) or {}, report)
+            S["ai_reports"] = ai_reports
             if narratives:
                 st.caption(f"{len(narratives)} approved narrative(s) will be "
                            "included in the PDFs and emails below.")
@@ -1073,7 +1132,8 @@ with tabs[3]:
                             z.writestr(
                                 f"team_{t.team}/{safe}_feedback.pdf",
                                 pdfgen.build_individual_pdf(
-                                    m, eval_no, course, report=report,
+                                    m, eval_no, course,
+                                    report=ai_reports.get(m.key, report),
                                     narrative=narratives.get(m.key, "")))
                 S["pdf_zip"] = zbuf.getvalue()
                 st.success("PDFs built.")
@@ -1090,7 +1150,8 @@ with tabs[3]:
                     m = next(m for t in teams for m in t.members
                              if t.team == ti and m.name == ni)
                     pdf = pdfgen.build_individual_pdf(
-                        m, eval_no, course, report=report,
+                        m, eval_no, course,
+                        report=ai_reports.get(m.key, report),
                         narrative=narratives.get(m.key, ""))
                     if narratives.get(m.key):
                         st.caption("This preview includes the approved AI narrative.")
@@ -1128,7 +1189,8 @@ with tabs[4]:
         report = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
         _results_delivery("res", S["teams"], S.get("roster"), subject_t, body_t,
                           attach_team, course, eval_no, report,
-                          S.get("ai_narratives") or {})
+                          S.get("ai_narratives") or {},
+                          S.get("ai_reports") or {})
 
 # =========================================================================== #
 # TAB 6 — Compare rounds (eval 1 vs 2 vs 3 for the same students)

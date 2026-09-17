@@ -1603,3 +1603,462 @@ def test_throttle_waits_between_calls_and_is_off_by_default():
     c._throttle()
     c._throttle()
     assert time.monotonic() - started < 0.05      # disabled means no sleeping
+
+
+# --------------------------------------------------------------------------- #
+# Model suitability, recommendations, and the observed track record
+# --------------------------------------------------------------------------- #
+
+from peerparley import model_advisor as advisor  # noqa: E402
+from peerparley.openrouter_catalog import (  # noqa: E402
+    KeyStatus,
+    fetch_key_status,
+    parse_models,
+)
+
+
+def _catalog():
+    return parse_models({"data": [
+        {"id": "openai/gpt-4.1-mini", "name": "mini", "context_length": 1000000,
+         "pricing": {"prompt": "0.0000004", "completion": "0.0000016"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["response_format", "structured_outputs"],
+         "top_provider": {"max_completion_tokens": 32768}},
+        {"id": "anthropic/claude-sonnet-4.5", "name": "sonnet",
+         "context_length": 200000,
+         "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["structured_outputs"],
+         "top_provider": {"max_completion_tokens": 64000}},
+        {"id": "good/free-model:free", "name": "good free",
+         "context_length": 1000000,
+         "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["structured_outputs"],
+         "top_provider": {"max_completion_tokens": 16000}},
+        {"id": "weak/rambler:free", "name": "weak free",
+         "context_length": 262000,
+         "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["max_tokens"],
+         "top_provider": {"max_completion_tokens": 4096}},
+        {"id": "tiny/toosmall:free", "name": "tiny",
+         "context_length": 4000, "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": [],
+         "top_provider": {"max_completion_tokens": 512}},
+    ]})
+
+
+def test_capability_fields_are_parsed():
+    models = {m.id: m for m in _catalog()}
+    assert models["openai/gpt-4.1-mini"].supports_json
+    assert models["openai/gpt-4.1-mini"].max_completion_tokens == 32768
+    assert not models["weak/rambler:free"].supports_json
+
+
+def test_a_model_too_small_for_the_job_is_ruled_out_before_spending():
+    models = {m.id: m for m in _catalog()}
+    a = advisor.assess(models["tiny/toosmall:free"], reply_tokens=4000)
+    assert a.verdict == "unusable" and not a.usable
+    assert any("truncate" in r for r in a.reasons)
+
+
+def test_no_structured_output_support_is_a_warning_not_a_ban():
+    """Salvage exists, so it is risky rather than impossible."""
+    models = {m.id: m for m in _catalog()}
+    a = advisor.assess(models["weak/rambler:free"], reply_tokens=4000)
+    assert a.verdict == "risky" and a.usable
+    assert any("structured outputs" in w for w in a.warnings)
+
+
+def test_a_reply_ceiling_under_the_configured_cap_warns():
+    models = {m.id: m for m in _catalog()}
+    a = advisor.assess(models["good/free-model:free"], reply_tokens=32000)
+    assert a.verdict == "risky"
+    assert any("ceiling" in w for w in a.warnings)
+
+
+def test_recommendations_cover_both_free_and_paid():
+    rec = advisor.recommend(_catalog(), reply_tokens=4000)
+    assert rec["paid"] and rec["free"]
+    assert rec["paid"].model == "openai/gpt-4.1-mini"       # cheapest of equals
+    assert rec["free"].model == "good/free-model:free"
+    assert rec["free"].usable and rec["paid"].usable
+
+
+def test_the_free_router_is_never_recommended():
+    """It picks a different model per call, so advising it advises a lottery."""
+    models = _catalog() + list(parse_models({"data": [
+        {"id": "openrouter/free", "name": "router", "context_length": 1000000,
+         "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["structured_outputs"],
+         "top_provider": {"max_completion_tokens": 32000}}]}))
+    rec = advisor.recommend(models, reply_tokens=4000)
+    assert rec["free"].model != "openrouter/free"
+    # ...but it is never hidden from the picker either.
+    assert any(m.id == "openrouter/free"
+               for m in advisor.usable_only(models, reply_tokens=4000))
+
+
+def test_observed_failure_downgrades_an_otherwise_fine_model():
+    models = {m.id: m for m in _catalog()}
+    records = {"good/free-model:free": advisor.ModelRecord(
+        model="good/free-model:free", attempts=40, written=2, empty=30, failed=8)}
+
+    clean = advisor.assess(models["good/free-model:free"], reply_tokens=4000)
+    assert clean.verdict == "suitable"
+
+    burned = advisor.assess(models["good/free-model:free"], reply_tokens=4000,
+                            record=records["good/free-model:free"])
+    assert burned.verdict == "risky"
+    assert any("poor record" in w for w in burned.warnings)
+    assert burned.score < clean.score
+    # And the recommendation moves away from it.
+    assert advisor.recommend(_catalog(), reply_tokens=4000,
+                             records=records)["free"].model != "good/free-model:free"
+
+
+def test_a_single_success_is_not_reported_as_a_100_percent_rate():
+    """The most tempting dishonesty in the whole module."""
+    one = advisor.ModelRecord(model="x", attempts=1, written=1)
+    assert one.rate is None
+    assert not one.enough_data
+    assert "too few runs" in one.summary()
+    assert "100%" not in one.summary()
+
+    enough = advisor.ModelRecord(model="x", attempts=10, written=9)
+    assert enough.rate == pytest.approx(0.9)
+    assert "90%" in enough.summary() and "10 attempts" in enough.summary()
+
+
+def test_track_record_accumulates_across_batches():
+    vault = MemoryVault()
+    good = fai.Draft(key="a", name="A", team="1", strengths="Real text.")
+    cut = fai.Draft(key="b", name="B", team="1", strengths="Partial.",
+                    truncated=True)
+    blank = fai.Draft(key="c", name="C", team="1")
+    broke = fai.Draft(key="d", name="D", team="1", error="401")
+    thin = fai.Draft(key="e", name="E", team="1",
+                     insufficient_evidence="Too few comments.")
+
+    advisor.record_batch(vault, "some/model", [good, cut, blank, broke, thin])
+    rec = advisor.load_records(vault)["some/model"]
+
+    # The thin one is not the model's fault, so it is not counted either way.
+    assert rec.attempts == 4
+    assert rec.written == 2 and rec.truncated == 1
+    assert rec.empty == 1 and rec.failed == 1
+
+    advisor.record_batch(vault, "some/model", [good])
+    assert advisor.load_records(vault)["some/model"].attempts == 5
+
+
+def test_recording_never_raises_on_a_broken_vault():
+    class Broken:
+        def get_bytes(self, n): raise RuntimeError("down")
+        def put_bytes(self, n, d): raise RuntimeError("down")
+    advisor.record_batch(Broken(), "m", [fai.Draft(key="a", name="A", team="1")])
+    assert advisor.load_records(Broken()) == {}
+
+
+def test_key_status_reports_a_rejected_key_without_raising():
+    st = fetch_key_status("")
+    assert not st.valid and "No API key" in st.error
+
+
+def test_key_status_free_allowance_is_readable():
+    st = KeyStatus(valid=True, is_free_tier=True, free_used=45,
+                   free_limit=50, free_remaining=5)
+    assert st.free_known and st.free_remaining == 5
+    assert not KeyStatus(valid=True, free_limit=0).free_known
+
+
+def test_usable_filter_keeps_risky_models_and_drops_hopeless_ones():
+    kept = {m.id for m in advisor.usable_only(_catalog(), reply_tokens=4000)}
+    assert "weak/rambler:free" in kept          # risky, but salvage may work
+    assert "tiny/toosmall:free" not in kept     # cannot ever fit
+
+
+# --------------------------------------------------------------------------- #
+# What students actually receive
+# --------------------------------------------------------------------------- #
+
+def test_the_four_written_feedback_modes_produce_different_reports():
+    from peerparley import pdfgen
+    m = make_student()
+    m.contributions = ["His VP part in the simulation.",
+                       "Good supply chain decisions."]
+    m.improvements = ["Better communication."]
+    narrative = ("Your teammates valued the VP role you played and your "
+                 "supply-chain decisions. One asked for more communication.")
+
+    sizes = {}
+    for label, flags in (
+        ("both", {"narrative": True, "valued": True, "focus": True}),
+        ("summary", {"narrative": True, "valued": False, "focus": False}),
+        ("comments", {"narrative": False, "valued": True, "focus": True}),
+        ("neither", {"narrative": False, "valued": False, "focus": False}),
+    ):
+        pdf = pdfgen.build_individual_pdf(m, "1", "MGT 490C", report=flags,
+                                          narrative=narrative)
+        assert pdf.startswith(b"%PDF")
+        sizes[label] = len(pdf)
+
+    assert sizes["both"] > sizes["summary"] > sizes["neither"]
+    assert sizes["both"] > sizes["comments"] > sizes["neither"]
+
+
+def test_summary_only_still_honours_the_approval_gate():
+    """Summary-only must not mean "send an unapproved draft"."""
+    from peerparley import pdfgen
+    m = make_student()
+    m.contributions = ["Did the modelling."]
+    m.improvements = ["Communicate earlier."]
+    flags = {"narrative": True, "valued": False, "focus": False}
+
+    unapproved = fai.Draft(key=m.key, name=m.name, team=m.team,
+                           strengths="A draft nobody approved.")
+    assert fai.approved_narratives({m.key: unapproved}) == {}
+
+    # With no approved narrative and the bullets switched off, the student
+    # simply gets no written feedback — never an unreviewed draft.
+    pdf = pdfgen.build_individual_pdf(
+        m, "1", "C", report=flags,
+        narrative=fai.approved_narratives({m.key: unapproved}).get(m.key, ""))
+    assert pdf.startswith(b"%PDF")
+
+
+# --------------------------------------------------------------------------- #
+# Language screening
+# --------------------------------------------------------------------------- #
+
+from peerparley import safety  # noqa: E402
+
+
+def test_the_screen_leaves_legitimate_criticism_alone():
+    """False positives train people to click through warnings."""
+    for text in ("Kyle did everything he was required to do.",
+                 "She could speak up more in meetings.",
+                 "His drafts arrived close to the deadline.",
+                 "Good supply chain decision making",
+                 "assignment class passed analysis association"):
+        assert safety.screen(text) == [], text
+
+
+def test_blunt_but_substantive_criticism_is_only_noted():
+    """"He did nothing" may be the honest and useful truth."""
+    for text in ("He contributed nothing to the project.",
+                 "She never showed up to a single meeting.",
+                 "Honestly he was lazy all semester."):
+        found = safety.screen(text)
+        assert found, text
+        assert safety.worst(found) == "mild"
+        assert not safety.blocks_release(found)
+
+
+def test_personal_insults_are_flagged_as_moderate():
+    found = safety.screen("This guy is a useless idiot.")
+    assert safety.worst(found) == "moderate"
+    assert not safety.blocks_release(found)
+    assert any("insult" in c.reason for c in found)
+
+
+def test_not_belonging_in_the_programme_is_flagged():
+    found = safety.screen("Total waste of space, shouldn't be in this major.")
+    assert safety.worst(found) == "moderate"
+    assert any("belong" in c.reason for c in found)
+
+
+def test_threats_and_slurs_block_release():
+    for text in ("kys", "He should die", "what a retarded thing to do"):
+        found = safety.screen(text)
+        assert safety.worst(found) == "severe", text
+        assert safety.blocks_release(found), text
+
+
+def test_advice_points_at_the_per_student_remedy():
+    """A severe finding in a teammate's words has a specific fix."""
+    from_comment = safety.screen("kys", where="comment")
+    assert "Summary only" in safety.advice(from_comment)
+    from_narrative = safety.screen("kys", where="narrative")
+    assert "regenerate" in safety.advice(from_narrative).lower()
+
+
+def test_a_bad_custom_pattern_cannot_break_the_screen():
+    safety.EXTRA_PATTERNS.append(("([unclosed", "broken", "severe"))
+    try:
+        assert safety.screen("perfectly ordinary feedback") == []
+    finally:
+        safety.EXTRA_PATTERNS.pop()
+
+
+def test_custom_patterns_are_honoured():
+    safety.EXTRA_PATTERNS.append((r"\bcollege-specific-slur\b",
+                                  "institution's own list", "severe"))
+    try:
+        found = safety.screen("that was a college-specific-slur moment")
+        assert safety.blocks_release(found)
+        assert any("institution" in c.reason for c in found)
+    finally:
+        safety.EXTRA_PATTERNS.pop()
+
+
+def test_comments_are_screened_even_when_no_narrative_is_written(settings):
+    """The case a narrative-only screen misses entirely.
+
+    Too few comments to draft from, so no API call — but the comments still
+    reach the student, and one of them is abusive.
+    """
+    settings.retry_truncated = False
+    thin = make_student(name="Target", key="target")
+    thin.contributions = ["kys"]
+    thin.improvements = []
+    thin.public_comments = []
+
+    client = FakeClient()      # empty queue: a call would raise
+    draft = fai.generate_draft(client, fai.build_source(thin), settings)
+
+    assert client.usage.calls == 0          # still no API call
+    assert draft.insufficient_evidence
+    assert draft.blocked                    # but it is flagged
+    assert draft.comment_concerns
+
+
+def test_both_surfaces_are_screened(student, settings):
+    settings.retry_truncated = False
+    student.contributions = ["He is a useless idiot.",
+                             "Built the regression model and explained it."]
+    payload = dict(GOOD_PAYLOAD)
+    client = FakeClient(payload)
+    draft = fai.generate_draft(client, fai.build_source(student), settings)
+
+    assert any(c.where == "comment" for c in draft.concerns)
+    assert draft.worst_concern == "moderate"
+    assert not draft.clean          # never bulk-approved with a flag
+
+
+def test_the_audit_can_add_a_concern_the_word_list_misses(student, settings):
+    """Contempt in clean language — no profanity to match on."""
+    settings.verify = True
+    settings.retry_truncated = False
+    audit = {
+        "grounded": True, "score": 1.0, "unsupported": [],
+        "abusive": [{"text": "She simply is not capable of this work.",
+                     "reason": "contempt directed at the person",
+                     "severity": "moderate", "where": "comment"}],
+    }
+    client = FakeClient(GOOD_PAYLOAD, audit)
+    draft = fai.generate_draft(client, fai.build_source(student), settings)
+
+    assert draft.concerns
+    assert any("contempt" in c.reason for c in draft.concerns)
+    assert client.usage.calls == 2          # no extra call for the screen
+
+
+def test_concerns_survive_the_vault_round_trip():
+    vault = MemoryVault()
+    d = fai.Draft(key="a", name="A", team="1", strengths="Text.")
+    d.concerns = [safety.Concern(text="kys", reason="threat",
+                                 severity="severe", where="comment")]
+    d.delivery = "summary"
+    fai.save_drafts(vault, "s", {"a": d})
+    back, _ = fai.load_drafts(vault, "s")
+    assert back["a"].blocked
+    assert back["a"].comment_concerns[0].reason == "threat"
+    assert back["a"].delivery == "summary"
+
+
+# --------------------------------------------------------------------------- #
+# Per-student delivery overrides
+# --------------------------------------------------------------------------- #
+
+def test_delivery_override_produces_per_student_report_flags():
+    base = {"narrative": True, "valued": True, "focus": True, "pay_grade": True}
+    drafts = {
+        "default": fai.Draft(key="default", name="D", team="1"),
+        "sum": fai.Draft(key="sum", name="S", team="1", delivery="summary"),
+        "raw": fai.Draft(key="raw", name="R", team="1", delivery="comments"),
+        "off": fai.Draft(key="off", name="O", team="1", delivery="none"),
+        "both": fai.Draft(key="both", name="B", team="1", delivery="both"),
+    }
+    out = fai.report_overrides(drafts, base)
+
+    assert "default" not in out          # follows the survey-wide setting
+    assert out["sum"] == {**base, "narrative": True,
+                          "valued": False, "focus": False}
+    assert out["raw"] == {**base, "narrative": False,
+                          "valued": True, "focus": True}
+    assert out["off"] == {**base, "narrative": False,
+                          "valued": False, "focus": False}
+    assert out["both"] == {**base, "narrative": True,
+                           "valued": True, "focus": True}
+    # Unrelated flags are carried through untouched.
+    assert all(v["pay_grade"] is True for v in out.values())
+
+
+def test_an_override_changes_only_that_students_pdf():
+    from peerparley import pdfgen
+    base = {"narrative": True, "valued": True, "focus": True}
+    m = make_student()
+    m.contributions = ["Built the model and explained it twice."]
+    m.improvements = ["Send updates earlier in the day."]
+    narrative = "Your teammates valued the model you built."
+
+    drafts = {m.key: fai.Draft(key=m.key, name=m.name, team=m.team,
+                               strengths=narrative, approved=True,
+                               delivery="summary")}
+    overrides = fai.report_overrides(drafts, base)
+
+    summary_only = pdfgen.build_individual_pdf(
+        m, "1", "C", report=overrides[m.key], narrative=narrative)
+    with_both = pdfgen.build_individual_pdf(
+        m, "1", "C", report=base, narrative=narrative)
+    assert len(with_both) > len(summary_only)
+
+
+def test_delivery_summary_counts_against_the_survey_default():
+    base = {"narrative": True, "valued": True, "focus": True}
+    drafts = {
+        "a": fai.Draft(key="a", name="A", team="1"),                  # default
+        "b": fai.Draft(key="b", name="B", team="1"),                  # default
+        "c": fai.Draft(key="c", name="C", team="1", delivery="summary"),
+    }
+    counts = fai.delivery_summary(drafts, base)
+    assert counts["both"] == 2 and counts["summary"] == 1
+
+    # With a summary-only survey default, the unset students count as summary.
+    counts = fai.delivery_summary(
+        drafts, {"narrative": True, "valued": False, "focus": False})
+    assert counts["summary"] == 3
+
+
+def test_comments_only_suppresses_an_approved_narrative():
+    """Choosing comments-only must beat an approval, not be beaten by it."""
+    base = {"narrative": True, "valued": True, "focus": True}
+    d = fai.Draft(key="a", name="A", team="1", strengths="Approved text.",
+                  approved=True, delivery="comments")
+    flags = fai.report_overrides({"a": d}, base)["a"]
+    assert flags["narrative"] is False
+    # The narrative is still "approved" — the report simply does not show it.
+    assert fai.approved_narratives({"a": d}) == {"a": "Approved text."}
+
+
+def test_batch_stats_counts_blocked_and_flagged_language():
+    blocked = fai.Draft(key="a", name="A", team="1", strengths="Text.")
+    blocked.concerns = [safety.Concern(text="kys", reason="threat",
+                                       severity="severe")]
+    moderate = fai.Draft(key="b", name="B", team="1", strengths="Text.")
+    moderate.concerns = [safety.Concern(text="idiot", reason="insult",
+                                        severity="moderate")]
+    mild = fai.Draft(key="c", name="C", team="1", strengths="Text.")
+    mild.concerns = [safety.Concern(text="lazy", reason="harsh",
+                                    severity="mild")]
+    clean = fai.Draft(key="d", name="D", team="1", strengths="Text.")
+
+    st = fai.batch_stats({"a": blocked, "b": moderate, "c": mild, "d": clean})
+    assert st["blocked"] == 1
+    assert st["flagged_language"] == 2          # severe + moderate, not mild
+    assert clean.clean and mild.clean           # mild does not block approval
+    assert not blocked.clean and not moderate.clean

@@ -29,6 +29,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from typing import Tuple
 
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 REQUEST_TIMEOUT = 20
@@ -45,6 +46,23 @@ class ORModel:
     completion_per_m: float
     is_free: bool
     price_known: bool = True
+    # Capability signals, added for PeerParley's pre-flight check. These are the
+    # fields that predict the two failures seen in practice: a model that cannot
+    # hold to a JSON shape, and one whose output ceiling is below what a
+    # narrative needs.
+    #
+    # A caveat that matters: supported_parameters is the union across every
+    # provider serving the model, and OpenRouter's own docs note that only some
+    # providers may honour structured outputs. So this is a strong signal, not a
+    # guarantee — which is why the app still asks for JSON in the prompt and
+    # salvages the reply rather than trusting the flag.
+    supported_parameters: Tuple[str, ...] = ()
+    max_completion_tokens: int = 0
+
+    @property
+    def supports_json(self) -> bool:
+        params = {p.lower() for p in self.supported_parameters}
+        return bool(params & {"structured_outputs", "response_format"})
 
     @property
     def vendor(self) -> str:
@@ -133,6 +151,8 @@ def parse_models(payload: dict) -> list[ORModel]:
         completion_per_m = _to_per_million(pricing.get("completion"))
         priced = prompt_per_m is not None and completion_per_m is not None
         model_id = str(entry["id"])
+        params = entry.get("supported_parameters")
+        top = entry.get("top_provider") or {}
         models.append(
             ORModel(
                 id=model_id,
@@ -143,6 +163,10 @@ def parse_models(payload: dict) -> list[ORModel]:
                 # ":free" is the usual marker, but the price is the ground truth.
                 is_free=priced and prompt_per_m == 0.0 and completion_per_m == 0.0,
                 price_known=priced,
+                supported_parameters=tuple(
+                    str(p) for p in (params or []) if isinstance(p, str)),
+                max_completion_tokens=int(
+                    top.get("max_completion_tokens") or 0),
             )
         )
 
@@ -217,6 +241,92 @@ def load_models(timeout: int = REQUEST_TIMEOUT) -> tuple[list[ORModel], str | No
             f"{exc} Showing a bundled snapshot instead — it may be out of date, "
             "and you can still type any model slug by hand."
         )
+
+
+KEY_URL = "https://openrouter.ai/api/v1/key"
+
+
+@dataclass(frozen=True)
+class KeyStatus:
+    """What OpenRouter says about a key, before a single token is spent.
+
+    ``GET /api/v1/key`` answers the two questions worth asking up front: is this
+    credential real, and how much of today's free allowance is left. Both used
+    to be discovered the expensive way — the first as forty identical 401s, the
+    second as a batch that stopped partway through a section.
+    """
+
+    valid: bool
+    label: str = ""
+    is_free_tier: bool = True
+    credits_remaining: float | None = None
+    free_used: int = 0
+    free_limit: int = 0
+    free_remaining: int = 0
+    error: str = ""
+
+    @property
+    def free_known(self) -> bool:
+        return self.free_limit > 0
+
+
+def fetch_key_status(api_key: str, timeout: int = 15) -> KeyStatus:
+    """Ask OpenRouter about this key. Never raises."""
+    key = (api_key or "").strip()
+    if not key:
+        return KeyStatus(valid=False, error="No API key given.")
+    request = urllib.request.Request(
+        KEY_URL,
+        headers={"Authorization": f"Bearer {key}",
+                 "Accept": "application/json",
+                 "User-Agent": "peerparley"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return KeyStatus(
+                valid=False,
+                error="OpenRouter rejected this key. Check it at "
+                      "https://openrouter.ai/keys — if it is not listed there "
+                      "it was revoked, and the free router needs a valid key "
+                      "too.",
+            )
+        return KeyStatus(valid=False,
+                         error=f"OpenRouter returned HTTP {exc.code}.")
+    except Exception as exc:  # noqa: BLE001 - a pre-flight check must not break
+        # Unreachable is not invalid: say so rather than condemning the key.
+        return KeyStatus(valid=False, error=f"Could not reach OpenRouter: {exc}")
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return KeyStatus(valid=False,
+                         error="OpenRouter sent an unexpected reply.")
+
+    free = data.get("free_model_daily_requests") or {}
+
+    def _int(value) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    limit = data.get("limit_remaining")
+    try:
+        credits = float(limit) if limit is not None else None
+    except (TypeError, ValueError):
+        credits = None
+
+    return KeyStatus(
+        valid=True,
+        label=str(data.get("label") or ""),
+        is_free_tier=bool(data.get("is_free_tier", True)),
+        credits_remaining=credits,
+        free_used=_int(free.get("used")),
+        free_limit=_int(free.get("limit")),
+        free_remaining=_int(free.get("remaining")),
+    )
 
 
 def pricing_map(models: list[ORModel]) -> dict[str, tuple[float, float]]:

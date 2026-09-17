@@ -70,13 +70,15 @@ def invite_parts(recipients, subject_t: str, body_t: str, course: str, eval_no: 
 
 def results_parts(teams, roster, subject_t: str, body_t: str, attach_team: bool,
                   course: str, eval_no: str, report: dict = None,
-                  narratives: dict = None) -> List[dict]:
+                  narratives: dict = None,
+                  reports: dict = None) -> List[dict]:
     """`narratives` maps student key -> approved AI narrative (v2). A student
     missing from the map gets a PDF without that section — the .eml and
     auto-send packs must honour the same approvals as the direct send, or the
     instructor's review could be bypassed just by choosing a different delivery
     method from the dropdown."""
     narratives = narratives or {}
+    reports = reports or {}
     out = []
     team_pdf = {}
     for t in teams:
@@ -90,7 +92,7 @@ def results_parts(teams, roster, subject_t: str, body_t: str, attach_team: bool,
             ctx = _ctx(m.name, m.team, eval_no, course)
             atts = [(f"{_safe(m.name)}_feedback.pdf",
                      pdfgen.build_individual_pdf(
-                         m, eval_no, course, report=report,
+                         m, eval_no, course, report=reports.get(m.key, report),
                          narrative=narratives.get(m.key, "")))]
             if attach_team:
                 atts.append((f"team_{t.team}_contribution.pdf", team_pdf[t.team]))
@@ -120,10 +122,11 @@ def invite_items(recipients, subject_t, body_t, course, eval_no, from_addr="") -
 
 
 def results_items(teams, roster, subject_t, body_t, attach_team, course, eval_no,
-                  report=None, from_addr="", narratives=None) -> List[Tuple[str, bytes]]:
+                  report=None, from_addr="", narratives=None,
+                  reports=None) -> List[Tuple[str, bytes]]:
     return [(f"{_safe(p['name'])}.eml", _eml(p))
             for p in results_parts(teams, roster, subject_t, body_t, attach_team,
-                                   course, eval_no, report, narratives)]
+                                   course, eval_no, report, narratives, reports)]
 
 
 def zip_folders(folders: dict) -> bytes:

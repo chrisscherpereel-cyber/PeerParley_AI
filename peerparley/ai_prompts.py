@@ -203,7 +203,22 @@ is grounded when a reader holding the comments would agree it says what they \
 say — not when it matches them word for word.
 
 Judge only against the evidence given. Your own views on what would be good \
-feedback are irrelevant."""
+feedback are irrelevant.
+
+SEPARATELY — ABUSIVE LANGUAGE
+You are also the second pair of eyes on whether anything here should reach a \
+student at all. Flag abusive content in the DRAFT *and* in the EVIDENCE, \
+because a teammate's own words are forwarded to the student too.
+
+Report: slurs or attacks on a protected characteristic; threats; sexual \
+harassment or sexualised remarks; contempt directed at the person rather than \
+their work ("an idiot", "shouldn't be in this major"); and profanity.
+
+Judge by what a reasonable reader would take from it, not by vocabulary — \
+contempt expressed in clean language still counts, and a word list has already \
+covered the obvious cases. Do NOT report blunt but substantive criticism: "he \
+contributed nothing", "she missed every deadline" and "his work needed redoing" \
+are legitimate peer evaluation however unwelcome they are to read."""
 
 
 VERIFY_USER = """EVIDENCE — the complete set of comments the draft was allowed \
@@ -222,7 +237,13 @@ Produce JSON with this exact shape:
       "problem": "which rule it breaks, in one short phrase",
       "severity": "high"}}
   ],
-  "note": "one sentence for the instructor, or an empty string"
+  "note": "one sentence for the instructor, or an empty string",
+  "abusive": [
+    {{"text": "the offending passage, quoted",
+      "reason": "what is wrong with it, in one short phrase",
+      "severity": "severe",
+      "where": "comment"}}
+  ]
 }}
 
 - "score" is the fraction of the draft's sentences that are grounded, from 0.0 \
@@ -232,7 +253,11 @@ to 1.0.
 or anything identifying a teammate; "low" for overstated counts and mild \
 over-generalization.
 - Return an empty "unsupported" list if the draft is faithful. Do not invent \
-problems to look thorough."""
+problems to look thorough.
+- "abusive" is empty for ordinary feedback, which is the normal case. Use \
+"severe" for slurs, threats or harassment, "moderate" for profanity and \
+personal contempt, "mild" for harsh-but-arguable phrasing. "where" is \
+"comment" when a teammate wrote it and "narrative" when the draft did."""
 
 
 def narrative_system(tone: str = "neutral") -> str:

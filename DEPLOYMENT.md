@@ -184,8 +184,8 @@ Full guide, including what gets sent and how the grounding checks work:
 ## Before the first live section
 
 ```bash
-python3 -m pytest tests/ -q     # 109 offline tests
-python3 qa_regression.py        # 69 end-to-end checks
+python3 -m pytest tests/ -q     # 141 offline tests
+python3 qa_regression.py        # 80 end-to-end checks
 ```
 
 Both run without any API key. Then dry-run one real section with
