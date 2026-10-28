@@ -44,9 +44,13 @@ from .comments import score_comment
 # --------------------------------------------------------------------------- #
 GRADE_SCALE: List[Tuple[float, str]] = [
     (0.00, "F"), (0.36, "D"), (0.43, "C-"), (0.50, "C"), (0.57, "C+"),
-    (0.64, "B-"), (0.78, "B"), (0.81, "B+"), (0.86, "A-"), (0.93, "A"), (1.00, "A"),
+    (0.64, "B-"), (0.71, "B"), (0.78, "B+"), (0.86, "A-"), (0.93, "A"), (1.00, "A"),
 ]
 DIMENSIONS = ["Team Player", "Quantity", "Quality", "Effect"]
+
+# Shown instead of a performance band when nobody evaluated a student. Kept
+# short because the summary table truncates this column to nine characters.
+NO_DATA = "No data"
 
 
 def letter_grade(value) -> str:
@@ -132,6 +136,10 @@ class StudentResult:
     performance: str            # High / Adequate / Expected / Low
     comment_points: int
     submitted_self_eval: bool
+    # True when no teammate evaluated this student at all. Their grade is left
+    # at the team score; the instructor is told rather than the student being
+    # silently handed the largest deduction the settings allow.
+    no_peer_input: bool = False
     # ---- rating-matrix dimension grades + pay grade (workbook parity) ----
     pay_grade: float = float("nan")
     peer_vals: List[float] = field(default_factory=lambda: [float("nan")] * 4)
@@ -235,6 +243,14 @@ def compute(
 
     long_df = long_df.copy()
     long_df["team"] = long_df["evaluator_key"].map(team_of)
+    if "points" in long_df.columns:
+        # A column where *every* cell failed to parse stays object dtype, and
+        # `None == None` is True, so the "is this a number" guard below would let
+        # a None through to float(). Coercing once here turns the whole class of
+        # bad allocation column (renamed question, text in every cell) into
+        # missing data, which the rest of this function already handles, instead
+        # of a TypeError that takes the results tab down.
+        long_df["points"] = pd.to_numeric(long_df["points"], errors="coerce")
     has_ratings = all(f"r{d}" in long_df.columns for d in range(4))
     has_rank = "rank" in long_df.columns
 
@@ -279,7 +295,13 @@ def compute(
                 if r.get("improve_text"):
                     improve[k].append(str(r["improve_text"]).strip())
             if r.get("confidential_comment"):
-                conf[k].append(str(r["confidential_comment"]).strip())
+                # The confidential note is one free-text box per submission — a
+                # message from the student to the instructor, not feedback about
+                # a particular teammate. Both intake paths park it on the first
+                # teammate row of the submission, so filing it by evaluatee made
+                # it read as evidence *about* whoever happened to be listed
+                # first. It belongs to its author.
+                conf.setdefault(e, []).append(str(r["confidential_comment"]).strip())
             if has_ratings:
                 for d in range(4):
                     v = _num(r.get(f"r{d}"))
@@ -293,9 +315,15 @@ def compute(
         for _, r in tdf.iterrows():
             display_name.setdefault(r["evaluator_key"], r["evaluator"])
 
-        received_avgs = {k: (float(np.mean(v)) if v else 0.0) for k, v in received.items()}
-        team_avg = float(np.mean([v for v in received_avgs.values()])) if received_avgs else 0.0
-        ranking = sorted(member_keys, key=lambda k: received_avgs.get(k, 0), reverse=True)
+        # Only students somebody actually rated have a received average. Treating
+        # "nobody submitted an evaluation of this student" as "every teammate gave
+        # them $0" is the difference between no adjustment and the maximum
+        # deduction, and it also used to drag the team average down for everyone
+        # else. A missing average means missing data, so it is left out of both.
+        received_avgs = {k: float(np.mean(v)) for k, v in received.items() if v}
+        unrated = [k for k in member_keys if k not in received_avgs]
+        team_avg = float(np.mean(list(received_avgs.values()))) if received_avgs else 0.0
+        ranking = sorted(received_avgs, key=lambda k: received_avgs[k], reverse=True)
         rank_of = {k: i + 1 for i, k in enumerate(ranking)}
 
         # ---- alternative peer-adjustment measures (each a normalized peer factor:
@@ -310,24 +338,47 @@ def compute(
                 if ranks_recv[k] else float("nan")
 
         alloc_source, alloc_team = dict(received_avgs), team_avg
-        if settings.normalize_raters:  # z-score each evaluator (removes leniency)
+        if settings.normalize_raters:
+            # Correct for easy and harsh graders, in dollars.
+            #
+            # Each rater's allocations are standardised and then mapped back onto
+            # the team's own pooled mean and spread, so a rater who splits
+            # $40/$35/$25 and one who splits $34/$33/$33 carry the same weight
+            # while the numbers stay dollars. The earlier version stopped at the
+            # standard score and used it where a ratio was expected, which put
+            # the adjustment on a different scale entirely: a single lenient
+            # rater could swing a teammate from +0% to -35% and reorder the team.
+            #
+            # Two properties worth keeping in mind, both covered by tests: when
+            # every rater spreads their dollars the same way this is a no-op, and
+            # a rater with one rating (or who gave everyone the same amount) has
+            # no spread to correct, so their ratings land on the team mean rather
+            # than counting as a verdict.
             given: Dict[str, List[float]] = {}
+            pooled: List[float] = []
             for _, r in tdf.iterrows():
                 v = _num(r.get("points"))
                 if v is not None:
                     given.setdefault(r["evaluator_key"], []).append(v)
-            zstat = {e: (float(np.mean(g)), float(np.std(g)) if len(g) > 1 else 0.0)
-                     for e, g in given.items()}
-            zrec: Dict[str, List[float]] = {k: [] for k in member_keys}
-            for _, r in tdf.iterrows():
-                v = _num(r.get("points"))
-                if v is None:
-                    continue
-                mu, sd = zstat.get(r["evaluator_key"], (0.0, 0.0))
-                zrec.setdefault(r["evaluatee_key"], []).append(((v - mu) / sd) if sd > 0 else 0.0)
-            alloc_source = {k: (1.0 + float(np.mean(zrec[k]))) if zrec.get(k) else 1.0
-                            for k in member_keys}
-            alloc_team = 1.0
+                    pooled.append(v)
+            if pooled:
+                pooled_mean = float(np.mean(pooled))
+                pooled_sd = float(np.std(pooled, ddof=0))
+                zstat = {e: (float(np.mean(g)),
+                             float(np.std(g, ddof=0)) if len(g) > 1 else 0.0)
+                         for e, g in given.items()}
+                adj: Dict[str, List[float]] = {}
+                for _, r in tdf.iterrows():
+                    v = _num(r.get("points"))
+                    if v is None:
+                        continue
+                    mu, sd = zstat.get(r["evaluator_key"], (pooled_mean, 0.0))
+                    z = ((v - mu) / sd) if sd > 0 else 0.0
+                    adj.setdefault(r["evaluatee_key"], []).append(
+                        pooled_mean + z * pooled_sd)
+                alloc_source = {k: float(np.mean(v)) for k, v in adj.items() if v}
+                alloc_team = (float(np.mean(list(alloc_source.values())))
+                              if alloc_source else team_avg)
 
         _rt = [v for v in member_rating.values() if v == v]
         rating_team = float(np.mean(_rt)) if _rt else float("nan")
@@ -356,8 +407,12 @@ def compute(
 
             rec = received.get(k, [])
             received_total = float(np.sum(rec)) if rec else 0.0
-            ravg = received_avgs.get(k, 0.0)
+            ravg = received_avgs.get(k)
             A = agreement_weight(rec, expected_share)
+            # Nobody evaluated this student at all: no dollars, no ratings, no
+            # ranking. There is nothing to grade them on, so they keep the team
+            # score and the instructor gets told who they are.
+            no_peer_input = (not rec and not any(dims[k]) and not ranks_recv[k])
 
             # ---- dimension grades from the rating matrix ----
             peer_vals = [float("nan")] * 4
@@ -369,18 +424,24 @@ def compute(
             # ---- performance: forced ranking if we have it, else allocation ----
             rmean = float(np.mean(ranks_recv[k])) if ranks_recv[k] else float("nan")
             forced = _forced_performance(rmean)
-            if forced is not None:
+            if no_peer_input:
+                perf = NO_DATA
+            elif forced is not None:
                 perf = forced
             else:
-                perf = _performance_label(settings.performance_method, ravg, team_avg,
-                                          settings.performance_band, rank_of.get(k, n), n)
+                perf = _performance_label(settings.performance_method,
+                                          ravg if ravg is not None else team_avg,
+                                          team_avg,
+                                          settings.performance_band,
+                                          rank_of.get(k, n), n)
                 if settings.agreement_guard and perf == "Low" and A <= 0.5:
                     perf = "Expected"
 
             # ---- pay grade = share of the team average ($100 allocation) ----------
             # Always shown to students (100% = an even share). Its ratio also drives
             # the grade when the "allocation" method is chosen.
-            pay_grade = (ravg / team_avg) if team_avg > 0 else 1.0
+            pay_grade = (ravg / team_avg) if (ravg is not None and team_avg > 0) \
+                else float("nan")
 
             # ---- rel = the chosen peer factor (1.0 = team average) ----------------
             # A student ABOVE the team average (rel > 1) earns a bonus; BELOW takes a
@@ -406,8 +467,21 @@ def compute(
             # so they only shrink the adjustment — they never flip its sign).
             raw_mult = 1 + settings.sensitivity_B * A * Q * (rel - 1)
             mult = max(settings.min_multiplier, min(settings.max_multiplier, raw_mult))
-            individual = ts * mult
-            signed = _round_pct(individual - ts, settings.rounding_step, settings.rounding_mode)
+            if no_peer_input:
+                mult = 1.0
+            # The rounding setting decides the grade, not just the label on it.
+            # Rounding only the displayed delta meant a student could be told
+            # "+5%" while the gradebook held 104.44 — two numbers for one
+            # student, and the instructor had no way to tell which was real.
+            # The rounded delta is applied, then re-capped, so what the report
+            # says is what the score is.
+            signed = _round_pct(ts * mult - ts, settings.rounding_step,
+                                settings.rounding_mode)
+            signed = min(max(signed, (settings.min_multiplier - 1) * ts),
+                         (settings.max_multiplier - 1) * ts)
+            signed = signed + 0.0           # turns -0.0 into 0.0, so no "+-0%"
+            individual = ts + signed
+            mult = (individual / ts) if ts else mult
 
             # ---- self evaluation ----
             self_vals = [float("nan")] * 4
@@ -440,6 +514,7 @@ def compute(
                 peer_ratio=round(peer_ratio, 3), A=A, Q=round(Q, 3), multiplier=round(mult, 4),
                 individual_score=round(individual, 2), signed_pct=signed, performance=perf,
                 comment_points=best_pts, submitted_self_eval=(k in submitters),
+                no_peer_input=no_peer_input,
                 pay_grade=pay_grade, peer_vals=peer_vals,
                 team_player=dim_letters[0], quantity=dim_letters[1],
                 quality=dim_letters[2], effect=dim_letters[3],
@@ -457,6 +532,79 @@ def compute(
 
     results.sort(key=lambda t: t.team.lower())
     return results
+
+
+def data_warnings(long_df: pd.DataFrame,
+                  teams: Optional[List[TeamResult]] = None,
+                  roster_names: Optional[List[str]] = None) -> List[str]:
+    """Problems in the responses that change the grades, in plain English.
+
+    These are the failures that used to be invisible: a name typed differently
+    in one response becomes an extra team member with no ratings; a student
+    listed on two teams merges the two; nobody evaluating a student used to hand
+    them the largest deduction the settings allow. Each one is still *handled*
+    conservatively — but the instructor is the only person who can actually fix
+    the cause, so they have to be told it happened.
+    """
+    out: List[str] = []
+    if long_df is None or long_df.empty:
+        return out
+
+    if {"evaluator_key", "evaluator_team"} <= set(long_df.columns):
+        pairs = (long_df.dropna(subset=["evaluator_team"])
+                 .groupby("evaluator_key")["evaluator_team"]
+                 .apply(lambda s: sorted({str(x) for x in s if str(x).strip()})))
+        for key, team_list in pairs.items():
+            if len(team_list) > 1:
+                shown = long_df.loc[long_df["evaluator_key"] == key, "evaluator"]
+                name = str(shown.iloc[0]) if len(shown) else key
+                out.append(
+                    f"**{name}** is listed on more than one team "
+                    f"({', '.join(team_list)}). Everything they submitted has been "
+                    f"counted under {team_list[0]}. Fix the team column and reload.")
+
+    if roster_names:
+        from .ingest import name_key          # local: keeps the import one-way
+        known = {name_key(n) for n in roster_names if str(n).strip()}
+        seen: Dict[str, str] = {}
+        for col_key, col_name in (("evaluatee_key", "evaluatee"),
+                                  ("evaluator_key", "evaluator")):
+            if col_key in long_df.columns and col_name in long_df.columns:
+                for k, nm in zip(long_df[col_key], long_df[col_name]):
+                    if str(k).strip() and str(k) not in known:
+                        seen.setdefault(str(k), str(nm))
+        if seen:
+            all_keys = {str(k) for col in ("evaluatee_key", "evaluator_key")
+                        if col in long_df.columns for k in long_df[col]
+                        if str(k).strip()}
+            names = ", ".join(sorted(seen.values())[:8])
+            more = f" (+{len(seen) - 8} more)" if len(seen) > 8 else ""
+            if all_keys and len(seen) > len(all_keys) / 2:
+                # Nearly nothing matched: this is not a typo, it is two files
+                # that write names differently. Listing 40 names would bury that.
+                out.append(
+                    f"Almost none of the names in the responses match your contact "
+                    f"list ({len(seen)} of {len(all_keys)}), so the two files are "
+                    f"probably writing names differently — \"{sorted(seen.values())[0]}\" "
+                    f"here against \"{sorted(roster_names)[0]}\" there. Grading still "
+                    f"works from the responses alone; matching them up is what lets "
+                    f"PeerParley email the reports.")
+            else:
+                out.append(
+                    f"These names appear in the responses but not in your contact list: "
+                    f"**{names}**{more}. Each one is being graded as a separate team "
+                    f"member. Usually it is a spelling difference — correct it in the "
+                    f"export or the contact list so the two match.")
+
+    if teams:
+        blind = [m.name for t in teams for m in t.members if m.no_peer_input]
+        if blind:
+            names = ", ".join(sorted(blind)[:8])
+            more = f" (+{len(blind) - 8} more)" if len(blind) > 8 else ""
+            out.append(
+                f"No teammate evaluated **{names}**{more}. They keep the team score "
+                f"with no adjustment, and they are left out of their team's average.")
+    return out
 
 
 def _pct(x) -> str:

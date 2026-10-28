@@ -46,6 +46,21 @@ import pandas as pd
 WORKSPACE_VERSION = 1
 
 
+def stored(vault: Any, name: str) -> bool:
+    """Is this object in the vault, whether or not it can be decrypted?
+
+    ``get_bytes`` decrypts on the way out, so a wrong encryption key and a
+    missing file raise the same exception. Listing the vault answers the
+    question the error cannot. Best-effort: a backend that cannot list is
+    treated as "do not know", which keeps the old behaviour rather than
+    inventing an alarm.
+    """
+    try:
+        return name in set(vault.list())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def workspace_key(username: str) -> str:
     return f"workspace__{(username or 'default').strip().lower()}.json"
 
@@ -123,8 +138,15 @@ def _frame_from_bytes(raw: bytes, fmt: str) -> pd.DataFrame:
 
 def save(vault: Any, username: str, *, long_df: Optional[pd.DataFrame],
          self_evals: Optional[Dict] = None, roster: Any = None,
-         course: str = "", eval_no: str = "") -> Tuple[bool, str]:
-    """Write the working dataset. Returns (saved, error). Never raises."""
+         course: str = "", eval_no: str = "",
+         settings: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+    """Write the working dataset. Returns (saved, error). Never raises.
+
+    ``settings`` carries the grading rules. Without them a resumed session
+    regraded at the defaults: an instructor who set sensitivity to 0.8 and came
+    back the next day saw different numbers for the same students, with nothing
+    on screen saying anything had changed.
+    """
     if long_df is None or not isinstance(long_df, pd.DataFrame) or long_df.empty:
         return False, "Nothing loaded yet, so there is nothing to autosave."
     try:
@@ -145,6 +167,7 @@ def save(vault: Any, username: str, *, long_df: Optional[pd.DataFrame],
             "students": len(by_key),
             "self_evals": _encode_self_evals(self_evals),
             "roster": by_key,
+            "settings": dict(settings or {}),
         }
         vault.put_bytes(
             workspace_key(username),
@@ -166,7 +189,19 @@ def load(vault: Any, username: str) -> Tuple[Optional[Dict[str, Any]], str]:
     """
     try:
         meta_raw = vault.get_bytes(workspace_key(username))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # "Could not read it" and "it is not there" arrive as the same
+        # exception, because decryption happens inside get_bytes. Telling them
+        # apart matters: a rotated or mistyped encryption key made the app
+        # report "nothing saved yet" and then overwrite the only copy of the
+        # instructor's work on the next autosave.
+        if stored(vault, workspace_key(username)):
+            return None, (
+                "A saved session is stored but could not be opened "
+                f"({exc}). This almost always means the encryption key changed "
+                "since it was saved. Nothing has been overwritten — put the "
+                "original fernet_key back and it will load."
+            )
         return None, ""
     try:
         meta = json.loads(meta_raw.decode("utf-8"))
@@ -194,6 +229,7 @@ def load(vault: Any, username: str) -> Tuple[Optional[Dict[str, Any]], str]:
         "saved_at": str(meta.get("saved_at") or ""),
         "rows": int(meta.get("rows") or len(long_df)),
         "students": int(meta.get("students") or 0),
+        "settings": dict(meta.get("settings") or {}),
     }, ""
 
 

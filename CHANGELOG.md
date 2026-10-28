@@ -1,5 +1,225 @@
 # Changelog
 
+## 2.9.0 — the whole-application audit
+
+A review of all 13,000 lines, prompted by one request ("have AI off by default,
+and validate the code"). Four reviews ran in parallel — the grading pipeline,
+the AI layer, performance, and the app as a first-time instructor meets it —
+and every finding below was reproduced before it was fixed. The grading changes
+alter numbers, so they were decided deliberately rather than by me.
+
+### The AI writer is off by default, and starts every session off
+
+`enabled` is no longer saved with the other AI preferences, and signing out
+clears the toggle. An instructor who tried the writer once in March does not
+find it armed in September, spending on an API account and sending student
+comments to a vendor because of a click they have forgotten. Everything around
+the switch — provider, model, tone, length — is still remembered, so turning it
+back on is one click rather than a re-setup. The API key is still never stored,
+and is now kept out of `repr()` as well.
+
+### Grades: four defects that produced wrong numbers
+
+**A student nobody evaluated was given the maximum deduction.** An empty list of
+received ratings averaged to `0.0`, so a student whose raters all failed to
+submit scored 0% of the team average: multiplier 0.50, −50% on the team score —
+and their zero dragged the team average down for everyone else too. Missing data
+is now missing: they keep the team score, they are left out of their team's
+average, their performance reads "No data", and the instructor gets a named list
+of who they are.
+
+**The $100 was collected for the whole team and then spent on nobody.** The form
+asked each student to split $100 across their team *including themselves* and
+required the total to be exactly $100 — then grading discarded the
+self-allocation. A student who kept $40 distributed only $60, lowering every
+teammate at no cost to themselves. The form now has no box for yourself and the
+total is required across teammates, which is what the grader always assumed (an
+even share is 100/(n−1)).
+
+**"Round to the nearest 5%" rounded only the label.** A student could be told
+"+5%" while the gradebook held 104.44. The rounded adjustment is now the one
+applied — the report and the score are the same number — and tab ③ says what a
+5% step means in practice, since most adjustments in a typical section are
+smaller than ±2.5% and now round to no change. `-0.0` also stopped rendering as
+"+-0%".
+
+**"Correct for rater leniency" had a unit bug.** It fed a standard score where a
+ratio was expected, so turning it on could swing one student from +0% to −35%
+and reorder the team. Each rater's dollars are now standardised and mapped back
+onto the team's own mean and spread, so the correction removes easy-grader and
+harsh-grader differences while the result stays in dollars on the same scale.
+It is a no-op when every rater spreads their money the same way.
+
+Also: the confidential note to the instructor is one box per submission, and
+both intake paths park it on the first teammate's row — so it used to read as
+evidence *about* that teammate. It is now filed under its author, and both
+instructor PDFs say so. The B−/B grade boundary was 0.78, which made that band
+twice as wide as every other and B a sliver; it is 0.71, restoring the uniform
+0.07 bands. An allocation column that parsed to nothing (a renamed Qualtrics
+question) crashed the results tab with a `TypeError` and now reads as missing
+data. A contact list saved from Excel in cp1252 crashed the upload on the first
+accented name.
+
+### Problems that changed the grades silently now say so
+
+One function, shown above the results table: a name spelled two ways is being
+graded as two students; a student listed on two teams has had both teams merged;
+nobody evaluated these students. When nearly every name differs, it says the two
+files are written in different formats rather than listing forty "typos".
+
+### The AI layer
+
+* A citation that wrapped a real comment in invented words scored a perfect
+  match — "Always on time" is real, "Always on time, and she told us to set up a
+  shared Gantt chart" is a recommendation nobody made. Containment in that
+  direction is now a high-severity flag that names what happened.
+* A verbatim copy of a terse comment ("On time") was reported as citing a
+  comment nobody wrote. Short citations that match a whole comment pass; short
+  ones that do not are flagged as unverifiable rather than accused of invention,
+  because crying wolf teaches a reviewer to ignore the real flags.
+* A draft of paragraphs with no sourced points gave the citation check nothing
+  to check, raised no flags, scored 1.0, and read as "Grounded". Bulk approval
+  now requires that something was actually checked.
+* A failed draft was never screened for abusive language — yet the student's
+  report falls back to their teammates' comments, so those comments reach them
+  either way. Now screened.
+* Clearing the draft box meant "use the generated text", so clearing a draft and
+  approving it shipped the model's original words. It now means what it says.
+* The per-student delivery override — the control that withholds an abusive
+  comment from one student — was outside the autosave guard, so it was never
+  written and was gone by the next sign-in.
+* `402`, `401` and `403` were matched as text anywhere in a provider's message.
+  "You requested 14025 tokens" contains "402", so an ordinary bad-request error
+  aborted the batch telling the instructor to buy credits they already had.
+  Status codes are now read as codes.
+* A spent free daily allowance arrives as a 429, indistinguishable from the
+  per-minute limit that *is* worth retrying, so it was retried four times per
+  student: 160 doomed requests and nine minutes of backoff for a 40-student
+  batch. It is now its own global failure that stops the batch and says when the
+  allowance resets.
+* The `_nonce` cache-busters never worked — Streamlit leaves underscore-prefixed
+  arguments out of the cache key — so the key-status panel kept showing a stale
+  error after the key was fixed. Removed, with `.clear()` doing the work.
+
+### Speed
+
+A click anywhere used to regrade all forty students: measured 1.1–10 seconds for
+teams of five, 44 seconds for teams of ten, and 12 more for three rounds on the
+Compare tab. Grades are now computed when the data or the settings change;
+comment-similarity is computed once per pair rather than three or four times
+(40 students: 1.19s → 0.42s); the instructor PDFs are built once per result set
+instead of twice per rerun; previews rasterise only when asked for; the response
+list is read at most every 30 seconds with a refresh button; the Compare tab
+waits for a button; and one vault instance is shared instead of ten per rerun,
+each acquiring its own auth token. The Qualtrics upload is parsed once per file
+rather than re-parsed on every rerun, where it had been quietly overwriting
+responses loaded from elsewhere.
+
+### For an instructor meeting this app for the first time
+
+* **Start here** — a five-step checklist above the tabs, ticked off from what is
+  actually true, each unmet step naming the one button that completes it.
+* The storage check now verifies the encryption key as well as the connection,
+  so "not finished being set up" is caught at sign-in rather than after forty
+  students have been typed in. Both setup messages lost their Python one-liners.
+* **Saving now refuses to re-point collected answers.** A student's identity in
+  a submission is their position in the saved roster; adding one student shifted
+  everyone after them, so answers already collected described the wrong people.
+  Nothing errored. Saving is blocked, with the reason, when it would do that.
+* Links cannot be sent before the survey is saved or without the app's address —
+  each used to send forty dead links with no error anywhere on screen. The
+  default address (a real one) is gone: it made the "enter your address" check
+  pass.
+* "Prepare them for me to look over first" now exists for SMTP, where one click
+  used to send forty real emails. Asking for drafts over SMTP previously *sent*
+  them; it now hands back a zip of ready-to-send emails.
+* Buttons that send name their audience and count ("Send 40 emails to students").
+  Discard, un-approve-everything and redraft-everyone ask first and name what
+  would be lost. "Approve the 38 clean drafts" now reads "Approve 38 drafts
+  without reading them", which is what the click means.
+* The review panel no longer opens with 38 of 40 drafts hidden.
+* The report settings on tab ① apply to the PDFs you build now, rather than only
+  after a save — which was impossible in a resumed session, where the save
+  button was disabled.
+* Grading settings are saved with the session, so resuming no longer regrades at
+  the defaults with nothing on screen saying so.
+* An unreadable saved session is reported as unreadable rather than as absent,
+  and the autosave is held off so it cannot be overwritten.
+* A jargon pass over the worst of it: tokens, slugs, nonces, z-scores, "Q", the
+  WebPA weighting fraction, Fernet, and "structured outputs" are gone from the
+  instructor's screen. A new "Check for new responses" button, and a notice when
+  more responses have arrived since the grades were loaded.
+
+### Removed
+
+Five unused encryption helpers, a `Roster.from_df` that nothing called and that
+picked the wrong column anyway, and an uncalled `delete_drafts`.
+
+30 new tests (185 total) and 10 new regression checks (90 total).
+
+## 2.8.2 — AttributeError on "On this computer"
+
+Choosing the local provider raised
+`AttributeError: 'LocalServer' object has no attribute 'status'` and the page
+went with it. `LocalServer` exposes `status_line()`, a method; the picker read
+`server.status`, a field that has never existed.
+
+**Why it shipped.** The mapping from a probe result to the dict the picker
+renders lived inside a `@st.cache_data` wrapper, where no test could call it.
+Every other state in that picker is covered; this one line was unreachable.
+It is now `_local_server_state()`, a plain function with no network and no
+Streamlit in it, covered by five tests across all three states a probe can
+return — unreachable, running with nothing downloaded, and ready.
+
+**Why it was fatal rather than annoying.** The sidebar renders before every
+tab, so an exception raised while drawing a picker loses the whole page, not
+the feature. Both rich pickers — OpenRouter and local — are now wrapped, and
+fall back to a plain text box with the error shown above it. The local probe's
+own fallback returns the same keys as a successful probe, which a test now
+asserts, because a fallback missing a key the picker reads would have been the
+same bug in a new costume.
+
+6 new tests (155 total).
+
+## 2.8.1 — "Should handle this" next to a 402
+
+A live run showed **✅ Should handle this** beside four identical failures:
+`402 — This request requires more credits, or fewer max_tokens. You requested
+up to 4000 tokens, but can only afford 680.` The verdict was true about
+capability and useless in practice, which is the exact failure mode
+`model_advisor` exists to prevent. Three defects.
+
+**402 was not classified.** It fell through to a generic per-student error, so
+one exhausted balance produced one failure per student. `BillingLLMError` now
+sits alongside `AuthLLMError` — both are global rather than per-student, so the
+batch aborts at the first one. Checked *before* the auth and transient markers,
+because some 401 bodies also mention credits and the remedies differ, and
+because retrying a billing failure cannot succeed.
+
+**The message now names the remedies.** It explains that OpenRouter
+pre-authorises the reply cap before generating (so a smaller request might have
+gone through), states what the balance actually covers, and points at adding
+credits or switching to a free model. It suggests lowering the cap *only* when
+the remaining balance would still fund a usable narrative — at 680 tokens it
+says plainly that lowering it will not rescue the run.
+
+**Affordability is now part of the verdict.** `assess()` takes
+`credits_remaining`, and a model the account cannot pay for is **🚫 Not enough
+credit to run this** rather than suitable — capable or not. `llm.affordable_tokens`
+does the arithmetic, and reproduces OpenRouter's own figure exactly: a
+`$0.000272` balance at `$0.40/M` gives 680, matching the API's number. Free
+models are never judged on the balance, since they draw on the daily allowance
+instead.
+
+The pre-flight also reports, for a paid model with a known balance, how many
+requests it can afford — and refuses to let a doomed batch start quietly.
+
+Fixed along the way: `affordable_tokens` floored `679.9999999999999` to 679,
+disagreeing with OpenRouter's 680 for a reason no instructor could have
+diagnosed.
+
+8 new tests (149 total).
+
 ## 2.8.0 — per-student delivery, one-student regenerate, and an abuse screen
 
 ### The delivery decision moves into review

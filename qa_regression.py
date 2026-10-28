@@ -489,6 +489,50 @@ _pdf_sum = pdfgen.build_individual_pdf(
 check("the override actually changes that student's PDF",
       len(_pdf_both) > len(_pdf_sum))
 
+# --------------------------------------------------------------------------- #
+# v2.9 — the whole-app audit: the behaviours an instructor depends on
+# --------------------------------------------------------------------------- #
+check("the AI writer is off on a freshly booted app",
+      not getattr(ss(at, "ai_settings"), "enabled", False))
+
+check("with the AI writer off, nothing AI-written reaches a student",
+      not (ss(at, "ai_narratives") or {}))
+
+from peerparley.aiconfig import SETTINGS_FIELDS  # noqa: E402
+check("turning the AI writer on is never remembered between sessions",
+      "enabled" not in SETTINGS_FIELDS and "api_key" not in SETTINGS_FIELDS)
+
+from peerparley.config import AppConfig  # noqa: E402
+check("no app address is assumed, so links cannot be sent to someone else's app",
+      AppConfig().public_url == "")
+
+from peerparley import grading as _grd  # noqa: E402
+_warnings = _grd.data_warnings(long_df, teams)
+check("data problems that change grades are reported, not swallowed",
+      isinstance(_warnings, list))
+
+_solo = long_df[long_df["evaluator_key"] == long_df["evaluator_key"].iloc[0]]
+_solo_teams = compute(_solo, GradeSettings())
+_unrated = [m for t in _solo_teams for m in t.members if m.no_peer_input]
+check("a student nobody evaluated keeps the team score",
+      bool(_unrated) and all(m.individual_score == m.team_score and m.signed_pct == 0
+                             for m in _unrated))
+check("and the instructor is told which students those are",
+      any("No teammate evaluated" in w
+          for w in _grd.data_warnings(_solo, _solo_teams)))
+
+_rounded = compute(long_df, GradeSettings(rounding_step=5))
+check("the adjustment shown is the adjustment applied",
+      all(abs(m.individual_score - (m.team_score + m.signed_pct)) < 1e-9
+          for t in _rounded for m in t.members))
+check("no student's grade delta renders as +-0%",
+      not any(str(v).startswith("+-")
+              for v in results_to_frame(_rounded)["Grade Δ"]))
+
+_frame_cached = results_to_frame(compute(long_df, GradeSettings()))
+check("caching grades did not change them",
+      _frame_cached.equals(results_to_frame(compute(long_df, GradeSettings()))))
+
 print("\n== SUMMARY ==")
 passed = sum(1 for _, ok in results if ok)
 print(f"{passed}/{len(results)} checks passed")

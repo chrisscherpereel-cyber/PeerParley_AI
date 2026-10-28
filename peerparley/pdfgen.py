@@ -402,10 +402,10 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
     if conf_rows:
         _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
         c.setFillColor(B.RED); c.setFont("Helvetica-Bold", 12)
-        c.drawString(MARGIN, yy[0], "Confidential comments to the instructor")
+        c.drawString(MARGIN, yy[0], "Confidential notes written to the instructor")
         yy[0] -= 6
         c.setFont("Helvetica", 8); c.setFillColor(B.GREY)
-        c.drawString(MARGIN, yy[0], "Not released to students.")
+        c.drawString(MARGIN, yy[0], "Each note is shown under the student who wrote it. Not released to students.")
         yy[0] -= 8
         c.setStrokeColor(B.GREEN_LIGHT); c.setLineWidth(1.5)
         c.line(MARGIN, yy[0], pw - MARGIN, yy[0]); yy[0] -= 18
@@ -437,7 +437,7 @@ def build_confidential_pdf(teams: List[TeamResult], course: str = "",
     c = canvas.Canvas(buf, pagesize=letter)
     y = _header(c, "Confidential Feedback", course or "")
     c.setFillColor(B.RED); c.setFont("Helvetica-Bold", 9)
-    c.drawString(MARGIN, y, "INSTRUCTOR ONLY — do not distribute to students.")
+    c.drawString(MARGIN, y, "INSTRUCTOR ONLY — do not distribute to students. Each note appears under its author.")
     y -= 24
     for t in teams:
         for m in t.members:

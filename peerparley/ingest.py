@@ -68,6 +68,24 @@ def read_table(file, filename: str = "") -> pd.DataFrame:
     buf = io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else raw
     if name.endswith((".xlsx", ".xls")):
         return pd.read_excel(buf)
+    # A contact list saved from Excel on Windows is usually cp1252, not UTF-8,
+    # and one accented name was enough to end the upload in a raw
+    # UnicodeDecodeError. Try the encodings people actually have, in order.
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            buf.seek(0)
+        except Exception:  # noqa: BLE001 - a plain iterable has no seek
+            pass
+        try:
+            return pd.read_csv(buf, encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    # latin-1 maps every byte, so reaching here means the file is not a CSV
+    # at all; let pandas raise the error that says so.
+    try:
+        buf.seek(0)
+    except Exception:  # noqa: BLE001
+        pass
     return pd.read_csv(buf)
 
 
@@ -109,38 +127,16 @@ def read_raw_export(file, filename: str = "") -> Tuple[List[str], pd.DataFrame]:
 class Roster:
     by_key: Dict[str, dict] = field(default_factory=dict)
 
-    @classmethod
-    def from_df(cls, df: pd.DataFrame) -> "Roster":
-        cols = list(df.columns)
-        name_c = _find(cols, ["full name", "name", "student"])
-        email_c = _find(cols, ["email"])
-        first_c = _find(cols, ["first name", "first"])
-        last_c = _find(cols, ["last name", "last"])
-        team_c = _find(cols, ["team", "group"])
-        r = cls()
-        for _, row in df.iterrows():
-            if name_c and pd.notna(row.get(name_c)):
-                full = str(row[name_c])
-            elif first_c and last_c:
-                full = f"{row.get(first_c,'')} {row.get(last_c,'')}".strip()
-            else:
-                continue
-            r.by_key[name_key(full)] = {
-                "name": full,
-                "first": str(row.get(first_c, "")).strip() if first_c else full.split(" ")[0],
-                "last": str(row.get(last_c, "")).strip() if last_c else full.split(" ")[-1],
-                "email": str(row.get(email_c, "")).strip() if email_c else "",
-                "team": str(row.get(team_c, "")).strip() if team_c else "",
-            }
-        return r
-
     def match(self, name: str) -> Optional[dict]:
         return self.by_key.get(name_key(name))
 
 
-# --------------------------------------------------------------------------- #
-# Qualtrics export -> tidy long_df + self_evals (+ roster)
-# --------------------------------------------------------------------------- #
+# (A `from_df` constructor used to live here. Nothing called it, and it picked
+# "First Name" as the full-name column — so every lookup through it missed.
+# Rosters are built by `survey.roster_for_matching` and by the Qualtrics parser
+# below, both of which key on the full name.)
+
+
 def _f(v):
     try:
         f = float(v)

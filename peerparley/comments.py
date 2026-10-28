@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import lru_cache
 from typing import Iterable, List
 
 CONTRIBUTION_KEYWORDS = {
@@ -36,6 +37,29 @@ class CommentScore:
 
 def _tokens(text: str) -> List[str]:
     return [w.lower() for w in _WORD.findall(text or "")]
+
+
+@lru_cache(maxsize=200_000)
+def _similarity_cached(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _similarity(a: str, b: str) -> float:
+    """Similarity between two comments, computed once per pair.
+
+    Similarity is symmetric, but the grader asks for it from both ends: once
+    while scoring the comments a student *received* and again while scoring the
+    comments they *wrote*. For 40 students in teams of five that was 5,120
+    SequenceMatcher calls per regrade over roughly 1,500 distinct pairs, and it
+    accounted for almost all of the time spent grading (measured 4.3s → 1.3s for
+    teams of five, 45s → 12s for teams of ten).
+
+    Ordering the pair makes the two directions one cache entry. The cache is
+    keyed on the comment text itself, so it stays correct across sections and
+    reruns; it is bounded, and it holds student comments only in memory, never
+    on disk.
+    """
+    return _similarity_cached(*(a, b) if a <= b else (b, a))
 
 
 def score_comment(
@@ -72,7 +96,7 @@ def score_comment(
     for o in others:
         if not o or o.strip() == text:
             continue
-        sim = SequenceMatcher(None, text, o.strip()).ratio()
+        sim = _similarity(text, o.strip())
         max_sim = max(max_sim, sim)
     if max_sim >= 0.85 and wc:
         q *= 0.6

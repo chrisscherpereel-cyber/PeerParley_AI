@@ -9,6 +9,14 @@ bullets and nothing else, which you read and approve before any student sees it.
 It is **off by default** and entirely optional. Grading, PDFs, email, the vault
 and the survey all behave exactly as in v1 with it switched off.
 
+**It starts off every time you sign in**, and that is deliberate rather than an
+oversight: the switch is the one setting PeerParley does not remember. Turning
+it on sends student comments to an outside service and can spend money on an
+API account, so it is never left armed for the next person — or for you in three
+months, after a click you have forgotten. Everything *around* the switch is
+remembered (provider, model, tone, length, the grounding options), so turning it
+back on is one click and not a re-setup. The API key is never stored at all.
+
 ## The one rule
 
 > The model may **reword and expand** what teammates wrote. It may not add
@@ -256,6 +264,13 @@ local model cannot be reached from there and stops, instead of offering an
 address that can never work. `localhost` on Streamlit's servers means
 Streamlit's container, not your computer.
 
+A failure while *drawing* either rich picker — the local one or OpenRouter's —
+no longer loses the page. The sidebar renders before every tab, so an
+exception there used to take the whole app down rather than the one feature; in
+2.8.2 both pickers fall back to a plain "type a slug" text box with the error
+shown above it, and the local probe's failure path returns exactly the same
+fields as a successful probe.
+
 ### Remembering your choices
 
 **💾 Remember these settings** saves your provider, model, tone, length and
@@ -415,6 +430,41 @@ shows what arrived under **What came back**, so nothing is invisible.
 If drafts keep getting cut off, raise **Reply size limit** in the sidebar. You
 pay for tokens produced, not for the cap, so a generous ceiling costs nothing.
 
+### `402` — out of credit
+
+> *This request requires more credits, or fewer max_tokens. You requested up to
+> 4000 tokens, but can only afford 680.*
+
+Not a model problem. OpenRouter **pre-authorises the reply cap against your
+balance before generating**, so a balance that cannot cover one request fails
+every request — the model never runs, and its capability is irrelevant.
+
+The arithmetic is worth seeing, because it explains why a tiny balance blocks
+everything: at `$0.40` per million output tokens, a 4,000-token cap costs
+`$0.0016`. A balance of `$0.0003` covers about 680 tokens, so every request is
+refused.
+
+Three remedies, in order of usefulness:
+
+1. **Add credits** at <https://openrouter.ai/settings/credits>. A one-time $10
+   also raises the free-model daily ceiling from 50 to 1,000 requests, so it
+   fixes two constraints at once.
+2. **Switch to a free model.** Those draw on the free daily allowance rather
+   than your balance, so they work at a zero balance.
+3. **Lower the reply size limit** — but only if the remaining balance covers a
+   usable narrative (roughly 800+ tokens). Below that, lowering the cap just
+   buys a truncated draft, and the app says so rather than suggesting it.
+
+The panel checks this before a batch: with a known balance and a paid model, it
+reports how many requests you can afford, and refuses to let a doomed batch
+start quietly. A model you cannot pay for is reported as **🚫 Not enough credit
+to run this**, not as suitable — an earlier version said "✅ Should handle this"
+beside a hard 402, which was true about capability and useless in practice.
+
+Billing failures abort the batch at the first one, like a rejected key: an
+exhausted balance says nothing about one student and everything about all of
+them.
+
 ### "Came back empty"
 
 The request succeeded and the model returned no narrative at all. This is a
@@ -545,7 +595,7 @@ grading changes either way.
 | `peerparley/workspace.py` | Session autosave and the complete `.ppx` bundle format |
 | `peerparley/model_advisor.py` | Model suitability verdicts, recommendations, track record |
 | `peerparley/safety.py` | Local screen for abusive language in comments and summaries |
-| `tests/test_feedback_ai.py` | 141 offline tests; no API key needed |
+| `tests/test_feedback_ai.py` | 185 offline tests; no API key needed |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to

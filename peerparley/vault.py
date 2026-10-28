@@ -26,7 +26,7 @@ from typing import List, Protocol
 import requests
 
 from .config import VaultConfig, load_config
-from .security import decrypt_bytes, encrypt_bytes
+from .security import CryptoError, decrypt_bytes, encrypt_bytes
 
 
 class StorageBackend(Protocol):
@@ -293,8 +293,25 @@ class Vault:
         self.backend.delete(name)
 
     def healthcheck(self) -> tuple[bool, str]:
+        """Can this app actually store student data right now?
+
+        Listing the backend is not enough to answer that. Every write goes
+        through Fernet first, so with no encryption key configured the local
+        backend listed happily and reported "reachable" in green — and the
+        instructor found out only after typing in forty students and clicking
+        Save. The key is checked here, in memory, with no round trip.
+        """
         try:
             self.backend.list()
-            return True, f"Vault '{self.cfg.backend}' reachable."
         except Exception as exc:  # noqa: BLE001
-            return False, f"Vault '{self.cfg.backend}' error: {exc}"
+            return False, f"Storage '{self.cfg.backend}' is not reachable: {exc}"
+        try:
+            probe = b"peerparley-healthcheck"
+            if decrypt_bytes(encrypt_bytes(probe)) != probe:
+                raise CryptoError("the encryption key did not round-trip")
+        except Exception as exc:  # noqa: BLE001
+            return False, (
+                f"Storage '{self.cfg.backend}' is reachable, but this app "
+                f"cannot store student data yet: {exc}"
+            )
+        return True, f"Storage '{self.cfg.backend}' is ready."

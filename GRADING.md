@@ -106,3 +106,49 @@ The instructor controls the two settings most people touch — **sensitivity B**
 the **maximum adjustment ±%** — on the *Grading rules* tab, with everything else
 under *Advanced options*. What each student *sees* on their PDF is controlled
 separately under *Set up survey → What students see in their feedback report*.
+
+## What changed in 2.9.0, and why
+
+Four behaviours here produced numbers that were wrong or disagreed with
+themselves. Each was reproduced on synthetic sections before being changed.
+
+**A student nobody evaluated keeps the team score.** An empty list of received
+ratings used to average to `0.0`, which is not "no data" but "every teammate
+gave this student nothing": multiplier 0.50, −50% on the team score, and a zero
+dragged into their team's average, lowering it for everyone else. Such a student
+is now excluded from the team average, their multiplier is exactly 1.0, their
+performance reads "No data", and tab ④ names them so the instructor can chase
+the missing evaluations.
+
+**The $100 goes to teammates, not the whole team.** The expected even share has
+always been `100/(n−1)`, so the money was always meant for the other members.
+The student form asked for a split across everyone including the student
+themselves, required the total to be $100, and then discarded the
+self-allocation — which meant a student who kept $40 for themselves distributed
+only $60 and lowered every teammate for free. The form no longer offers a box
+for yourself.
+
+**Rounding decides the grade, not just the label.** `Round adjustments to 1% /
+5%` used to round only the displayed delta while the stored score stayed exact,
+so a student could be shown "+5%" against a gradebook figure of 104.44. The
+rounded delta is now applied: the report and the score are the same number, and
+the cap is re-applied afterwards so nothing can exceed the configured limits.
+One consequence is worth planning around — in 5% steps any adjustment smaller
+than ±2.5% becomes no change at all, which in a typical section is most
+students. Use 1% steps if you want smaller differences to reach the gradebook.
+
+**Correcting for easy and harsh graders stays in dollars.** The old
+implementation z-scored each evaluator and then used the standard score where a
+ratio was expected, so the adjustment moved onto a different scale entirely: in
+testing, one extreme rater swung a teammate from +0% to −35% and reordered the
+team. Each rater's allocations are now standardised and mapped back onto the
+team's own pooled mean and spread. A rater who splits $40/$35/$25 and one who
+splits $34/$33/$33 then carry the same weight, the numbers stay dollars, and the
+correction is a no-op when every rater spreads their money the same way. A rater
+with no spread at all (everyone the same amount) counts as neutral rather than
+as a verdict.
+
+A fifth change is cosmetic but visible: the B−/B boundary was 0.78, which made
+B− twice as wide as every other band and B a 0.03 sliver. It is 0.71, restoring
+the uniform 0.07 bands. This affects the letter shown beside a rating dimension,
+not the grade adjustment.

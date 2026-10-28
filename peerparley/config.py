@@ -55,7 +55,11 @@ class AppConfig:
     # used to build them. token_secret is optional — survey.token_secret()
     # derives a stable fallback from fernet_key when it's blank.
     token_secret: str = ""
-    public_url: str = "https://peerparley.streamlit.app"
+    # Deliberately empty. A real-looking default here is worse than none:
+    # it made `base_url` non-empty, so the "enter the app URL first" check
+    # passed and an instructor whose deployment lives elsewhere emailed forty
+    # students a link to somebody else's app.
+    public_url: str = ""
     vault: VaultConfig = field(default_factory=VaultConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     m365: Dict[str, Any] = field(default_factory=dict)
@@ -84,7 +88,7 @@ def load_config() -> AppConfig:
         app_password_sha256=str(_get(None, "app_password_sha256", "")),
         fernet_key=str(_get(None, "fernet_key", "")),
         token_secret=str(_get(None, "token_secret", "")),
-        public_url=str(_get(None, "public_url", "https://peerparley.streamlit.app")),
+        public_url=str(_get(None, "public_url", "")),
         vault=VaultConfig(backend=backend, folder=folder, options=dict(options)),
         email=email,
         m365=dict(m365),

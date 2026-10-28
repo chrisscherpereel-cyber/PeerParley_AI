@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -82,9 +82,15 @@ DEFAULT_SURVEY: Dict = {
 
     # ---- Pay allocation ----
     "ask_allocation": True,
-    "allocation_prompt": ("You have been given $100 to pay your team for their contribution "
-                          "to the project. Allocate a portion to each member (consider both "
-                          "performance and effort). It must total exactly $100."),
+    # The $100 is shared among TEAMMATES, not the whole team including yourself.
+    # That is what the grader assumes (an even share is 100/(n-1)), and money
+    # kept back for yourself was being discarded — which quietly rewarded
+    # withholding, because every dollar not given out lowered a teammate at no
+    # cost to the student holding it.
+    "allocation_prompt": ("You have been given $100 to pay your teammates for their "
+                          "contribution to the project. Allocate a portion to each of them "
+                          "(consider both performance and effort). It must total exactly "
+                          "$100. You are not paying yourself."),
     "points_total": 100,
 
     # ---- Your own contribution (released anonymously) ----
@@ -311,6 +317,43 @@ def save_setup(course: str, eval_no: str, contact_df: pd.DataFrame,
                {"course": course, "eval_no": eval_no, "teams": teams, "owner": snap_owner})
     _save_json(vault, key_survey(slug), survey_cfg)
     return slug, teams
+
+
+def roster_shift(vault: Vault, slug: str, contact_df: pd.DataFrame) -> Dict[str, Any]:
+    """Would re-saving this contact list re-point answers already collected?
+
+    A student's identity in a submission is their *position* in the stored
+    roster snapshot — team plus index, sorted by name — because that is what the
+    link token carries. Re-saving a contact list rebuilds those positions. Add
+    one student named "Adams" to a team and everyone after them shifts by one,
+    so submissions already in the vault start describing the wrong people:
+    dollars land on the wrong teammate, and the comments a student wrote are
+    attributed to someone else. Nothing errors. The grades are simply wrong.
+
+    Returns ``{"teams": [...], "responses": n, "safe": bool}`` — the teams whose
+    ordered membership would change, and how many submissions are already
+    stored for them. ``safe`` is True when re-saving changes nothing that has
+    answers attached, which is the ordinary case (fixing a typo in an email
+    address, say, or saving before any links went out).
+    """
+    out: Dict[str, Any] = {"teams": [], "responses": 0, "safe": True}
+    snap = load_roster_snapshot(vault, slug)
+    if not snap:
+        return out                      # nothing stored yet: nothing to disturb
+    old_teams = snap.get("teams", {}) or {}
+    new_teams = build_teams(contact_df)
+    moved = [
+        team for team, members in old_teams.items()
+        if [m.get("name") for m in members]
+        != [m.get("name") for m in new_teams.get(team, [])]
+    ]
+    if not moved:
+        return out
+    affected = [r for r in all_responses(vault, slug) if r.get("team") in moved]
+    out["teams"] = sorted(moved)
+    out["responses"] = len(affected)
+    out["safe"] = not affected
+    return out
 
 
 def survey_owner(vault: Vault, slug: str) -> Optional[str]:
@@ -560,7 +603,8 @@ def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # Public student form (served by app.py when a ?t=<token> is present)
 # --------------------------------------------------------------------------- #
-def submission_problems(answers: Dict, survey_cfg: Dict, n_members: int) -> List[str]:
+def submission_problems(answers: Dict, survey_cfg: Dict, n_members: int,
+                        self_pos: Optional[int] = None) -> List[str]:
     """Pure validation used both for live feedback and to gate the submit button.
     Returns a list of human-readable problems ([] means ready to submit)."""
     problems: List[str] = []
@@ -583,8 +627,10 @@ def submission_problems(answers: Dict, survey_cfg: Dict, n_members: int) -> List
             problems.append("Use every ranking category at least once.")
     if survey_cfg.get("ask_allocation", True):
         total = int(survey_cfg.get("points_total", 100))
+        # Self is excluded: the student does not pay themselves, so their own
+        # row carries no allocation and must not count towards the total.
         running = sum(int((answers.get(str(i), {}) or {}).get("alloc") or 0)
-                      for i in range(n_members))
+                      for i in range(n_members) if i != self_pos)
         if running != total:
             problems.append(f"Pay allocation must total exactly ${total} (currently ${running}).")
     return problems
@@ -729,9 +775,12 @@ def render_student_app(token: str) -> None:
         st.markdown("### Pay students")
         st.caption(survey.get("allocation_prompt", ""))
         for i, m in enumerate(members):
+            if i == pos:
+                # No box for yourself: the $100 is for teammates. A student who
+                # kept dollars back used to lower every teammate for free.
+                continue
             pa = pmembers.get(str(i), {}) or {}
-            who = m["name"] + ("  (yourself)" if i == pos else "")
-            allocs[str(i)] = st.number_input(who, min_value=0, max_value=total,
+            allocs[str(i)] = st.number_input(m["name"], min_value=0, max_value=total,
                                              value=int(pa.get("alloc", 0) or 0), step=1,
                                              key=f"alloc_{i}")
             answers[str(i)]["alloc"] = allocs[str(i)]
@@ -763,7 +812,7 @@ def render_student_app(token: str) -> None:
 
     # ---- live validation summary + gated submit -----------------------------
     st.markdown("---")
-    problems = submission_problems(answers, survey, len(members))
+    problems = submission_problems(answers, survey, len(members), self_pos=pos)
     if problems:
         st.error("**Before you can submit:**\n\n" + "\n".join(f"- {p}" for p in problems))
     else:

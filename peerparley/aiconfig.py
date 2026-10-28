@@ -235,9 +235,16 @@ def configured_providers() -> List[str]:
 # security story is that it lives in session memory and dies with the session;
 # persisting it "for convenience" would quietly move it to disk and make the
 # promise in docs/AI_FEEDBACK.md false.
+#
+# `enabled` is not included either, for a different reason: the AI writer is off
+# by default and starts every session off. Remembering "on" would mean an
+# instructor who tried it once in March finds it armed in September — spending
+# on an API account and sending student comments to a vendor because of a click
+# they have forgotten. Everything *around* the switch is remembered, so turning
+# it back on is one click rather than a re-setup.
 
 SETTINGS_FIELDS = (
-    "enabled", "provider", "model", "temperature", "max_tokens", "tone",
+    "provider", "model", "temperature", "max_tokens", "tone",
     "target_words", "verify", "verify_threshold", "local_base_url",
     "include_ratings", "extra_guidance", "retry_truncated",
     "requests_per_minute",
@@ -325,7 +332,10 @@ class AISettings:
     enabled: bool = False
     provider: str = DEFAULT_PROVIDER
     model: str = PROVIDERS[DEFAULT_PROVIDER].models[0]
-    api_key: str = ""
+    # repr=False so the key cannot reach a screen or a log through an ordinary
+    # f-string or st.write of the object. Nothing prints these today; this is
+    # the cheap way to keep that true as the code changes.
+    api_key: str = field(default="", repr=False)
     # Low by default. This task is rewording someone else's words, not creative
     # writing — a higher temperature buys nothing and costs faithfulness.
     temperature: float = 0.2

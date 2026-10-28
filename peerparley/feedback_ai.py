@@ -49,6 +49,8 @@ from .aiconfig import AISettings, get_provider
 from .grading import StudentResult, TeamResult
 from .llm import (
     AuthLLMError,
+    BillingLLMError,
+    QuotaLLMError,
     LLMClient,
     LLMError,
     TruncatedResponseError,
@@ -73,9 +75,18 @@ NARRATIVE_KEYS = ("strengths", "focus", "disagreement")
 # the quote is not a copy of anything the student's teammates wrote.
 QUOTE_MATCH_THRESHOLD = 0.80
 
-# A citation shorter than this is not evidence of anything — "good" appears in
-# almost any comment pool — so it is treated as missing rather than matched.
+# A citation shorter than this cannot be judged by word overlap — "good"
+# appears in almost any comment pool — so unless it is an exact copy of
+# something a teammate wrote it is reported as unverifiable.
 MIN_QUOTE_CHARS = 12
+
+# The score given to a citation too short to check that is not a verbatim copy.
+# Chosen to sit below QUOTE_MATCH_THRESHOLD (so it is flagged) and above the 0.4
+# fabrication line (so it is flagged as "could not be checked", not as "cites a
+# comment nobody wrote"). The distinction matters: one asks the instructor to
+# look, the other accuses the model of inventing evidence, and crying wolf on
+# the second is how a reviewer learns to ignore both.
+UNVERIFIABLE_MATCH = 0.5
 
 DIMENSION_LABELS = ("Team player", "Quantity of work", "Quality of work",
                     "Effect on team")
@@ -274,6 +285,10 @@ class Draft:
 
     # Instructor state. `edited` holds their rewrite; empty means "as generated".
     edited: str = ""
+    # Set when the instructor empties the draft box: "this student gets no
+    # narrative", which an empty `edited` cannot say because that already means
+    # "use the generated text".
+    cleared: bool = False
     approved: bool = False
     # Per-student override of what this student receives, decided in review:
     # "" follows the survey-wide setting, otherwise "both" | "summary" |
@@ -333,12 +348,27 @@ class Draft:
         """
         return (self.ok and not self.flags and self.score >= 0.999
                 and not self.empty
+                # A clean score over nothing is not a pass. A model that returns
+                # paragraphs but no sourced points — common on the free router,
+                # which cannot be held to a JSON shape — gave the citation check
+                # nothing to check, so it raised no flags and scored 1.0. That
+                # read as "Grounded" on a draft where not one sentence had been
+                # traced to a comment. Bulk approval has to mean "checked".
+                and self.quotes_checked
+                and bool(self.strength_points or self.focus_points)
                 # A language concern is never swept up by bulk approval: the
                 # whole point of raising it is that a human reads it.
                 and self.worst_concern in ("", "mild"))
 
     def text(self) -> str:
         """The narrative as it would appear in the PDF."""
+        if self.cleared:
+            # The instructor emptied the box. That is a decision — "send this
+            # student no narrative" — and it used to be unexpressible: an empty
+            # `edited` meant "as generated", so clearing a draft and approving
+            # it shipped the model's original text, which is the opposite of
+            # what emptying it says.
+            return ""
         if self.edited.strip():
             return self.edited.strip()
         if self.insufficient_evidence.strip():
@@ -395,7 +425,8 @@ class Draft:
             "score": round(self.score, 3),
             "flags": [f.to_dict() for f in self.flags],
             "verified": self.verified, "quotes_checked": self.quotes_checked,
-            "edited": self.edited, "approved": self.approved,
+            "edited": self.edited, "cleared": self.cleared,
+            "approved": self.approved,
             "delivery": self.delivery,
             "concerns": [c.to_dict() for c in self.concerns],
             "model": self.model, "provider": self.provider,
@@ -436,6 +467,7 @@ class Draft:
             verified=bool(d.get("verified", False)),
             quotes_checked=bool(d.get("quotes_checked", False)),
             edited=str(d.get("edited", "") or ""),
+            cleared=bool(d.get("cleared", False)),
             approved=bool(d.get("approved", False)),
             delivery=str(d.get("delivery", "") or ""),
             concerns=[safety.Concern.from_dict(c)
@@ -507,30 +539,70 @@ def build_user_prompt(src: FeedbackSource, settings: AISettings) -> str:
 def _best_match(quote: str, pool: Sequence[str]) -> float:
     """How well a cited quote matches anything in the evidence, 0..1.
 
-    Substring containment first, because an exact copy is the normal case and
-    should cost nothing. Otherwise the fraction of the quote's words that appear
-    in the single best-matching comment — word overlap rather than character
-    similarity, since a model that trims or reorders a clause is still citing
-    that comment, while one that invented a sentence shares only stopwords with
-    everything.
+    A quote contained *in* a real comment scores 1.0, because an exact copy is
+    the normal case and should cost nothing. The reverse does not: a citation
+    that contains a real comment plus material of the model's own invention used
+    to score 1.0 as well, which is precisely the fabrication this check exists
+    to catch — "Always on time" is real, "Always on time, and she told us to set
+    up a shared Gantt chart" is a recommendation nobody made, wearing a real
+    quote as a disguise. Those are scored on word overlap like anything else, so
+    the invented half counts against them.
+
+    Otherwise: the fraction of the quote's words that appear in the single
+    best-matching comment — word overlap rather than character similarity, since
+    a model that trims or reorders a clause is still citing that comment, while
+    one that invented a sentence shares only stopwords with everything.
+
+    Short citations are the one case where overlap cannot be trusted in either
+    direction, so an exact hit is checked *before* the length floor: "On time"
+    is a whole comment in some sections, and reporting a verbatim copy of it as
+    "cites a comment that does not appear in this student's feedback" is a false
+    accusation, which teaches the instructor to click past the true ones.
     """
     q = _norm(quote)
-    if len(q) < MIN_QUOTE_CHARS:
-        return 0.0
-    best = 0.0
     q_words = q.split()
     if not q_words:
         return 0.0
-    for candidate in pool:
-        c = _norm(candidate)
+    normalised = [_norm(c) for c in pool]
+    # A short citation counts only when it is a whole comment, not when it turns
+    # up inside one: "On time" as somebody's entire comment is a real citation,
+    # while "good" lifted out of "he is good at Excel" is the coincidence that
+    # MIN_QUOTE_CHARS exists to catch.
+    if q in normalised:
+        return 1.0
+    if len(q) < MIN_QUOTE_CHARS:
+        # Too little text to judge by overlap, and not a whole comment.
+        # Deliberately not 0.0: that reads as "fabricated", and the honest
+        # answer is "cannot be verified" — a low-severity flag, not a high one.
+        return UNVERIFIABLE_MATCH
+    if any(c and q in c for c in normalised):
+        return 1.0
+    best = 0.0
+    for c in normalised:
         if not c:
             continue
-        if q in c or c in q:
-            return 1.0
         c_words = set(c.split())
         hit = sum(1 for w in q_words if w in c_words) / len(q_words)
         best = max(best, hit)
     return best
+
+
+def _wraps_a_real_comment(quote: str, pool: Sequence[str]) -> bool:
+    """Is this citation a real comment with extra words bolted on?
+
+    The specific trick worth naming: take something a teammate actually wrote,
+    append a recommendation nobody made, and present the whole thing as a quote.
+    It used to score a perfect match. Containment in this direction is never
+    innocent — a citation is supposed to be shorter than its source, not longer.
+    """
+    q = _norm(quote)
+    if not q:
+        return False
+    for candidate in pool:
+        c = _norm(candidate)
+        if c and c != q and c in q:
+            return True
+    return False
 
 
 def check_quotes(draft: Draft, src: FeedbackSource) -> None:
@@ -547,17 +619,24 @@ def check_quotes(draft: Draft, src: FeedbackSource) -> None:
         point.quote_match = match
         point.quote_ok = match >= QUOTE_MATCH_THRESHOLD
         if not point.quote_ok:
-            draft.flags.append(Flag(
-                text=point.point,
-                problem=(
+            if _wraps_a_real_comment(point.source, pool):
+                problem, severity = (
+                    "quotes a real comment but adds words to it — the extra "
+                    "text is the model's, not a teammate's", "high")
+            elif match == UNVERIFIABLE_MATCH and len(_norm(point.source)) < MIN_QUOTE_CHARS:
+                problem, severity = (
+                    "quotes too little text to check against the comments — "
+                    "read this one yourself", "low")
+            elif match < 0.4:
+                problem, severity = (
                     "cites a comment that does not appear in this student's "
-                    "feedback" if match < 0.4 else
+                    "feedback", "high")
+            else:
+                problem, severity = (
                     f"citation only loosely matches any real comment "
-                    f"({match:.0%} overlap)"
-                ),
-                severity="high" if match < 0.4 else "low",
-                origin="quote-check",
-            ))
+                    f"({match:.0%} overlap)", "low")
+            draft.flags.append(Flag(text=point.point, problem=problem,
+                                    severity=severity, origin="quote-check"))
         # An honest citation can still be over-claimed: one comment cannot have
         # been raised by three teammates.
         if point.raised_by > 1:
@@ -668,9 +747,12 @@ def generate_draft(
             truncated = False
             partial_raw = ""
             break
-        except AuthLLMError:
-            # Not this student's problem, and not survivable by moving to the
-            # next one. Let it out so the batch can stop at the first occurrence.
+        except (AuthLLMError, BillingLLMError, QuotaLLMError):
+            # None of these is this student's problem, and none is survivable by
+            # moving to the next one: a rejected key, an empty balance and a
+            # spent daily allowance are all facts about the whole batch. Let them
+            # out so it stops at the first occurrence rather than repeating one
+            # fact per student.
             raise
         except TruncatedResponseError as exc:
             truncated = True
@@ -771,11 +853,23 @@ def screen_language(draft: Draft, src: FeedbackSource) -> None:
 
 def _failed(src: FeedbackSource, settings: AISettings, message: str,
             truncated: bool = False) -> Draft:
-    return Draft(
+    """A student whose draft could not be written — still screened.
+
+    The screen is not about the narrative. When generation fails the student's
+    report falls back to their teammates' comments *as written*, so those
+    comments reach them either way, and a comment that needs an instructor's
+    eyes needs them most in the case where no AI output exists to look at. The
+    thin-evidence path already screened for this reason; the failure path did
+    not, so one timed-out request was enough to forward an abusive comment with
+    no flag anywhere on the screen.
+    """
+    draft = Draft(
         key=src.key, name=src.name, team=src.team,
         error=message, truncated=truncated, score=0.0,
         model=settings.model, provider=settings.provider,
     )
+    screen_language(draft, src)
+    return draft
 
 
 # --------------------------------------------------------------------------- #
@@ -807,7 +901,7 @@ def verify_draft(client: LLMClient, draft: Draft, src: FeedbackSource) -> None:
         payload = client.complete_json(
             ai_prompts.VERIFY_SYSTEM, user, max_tokens=1200
         )
-    except AuthLLMError:
+    except (AuthLLMError, BillingLLMError, QuotaLLMError):
         raise
     except Exception as exc:
         # A failed audit is not a passed audit. Say the check did not run and
@@ -956,7 +1050,18 @@ def load_drafts(vault: Any, slug: str) -> Tuple[Dict[str, Draft], str]:
         return {}, ""
     try:
         raw = vault.get_bytes(drafts_key(slug))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # Decryption happens inside get_bytes, so "never saved" and "saved but
+        # unreadable" arrive identically. Reporting the second as the first sent
+        # the instructor back to a blank panel, and the next save then wrote
+        # over the review they thought was lost.
+        from . import workspace
+        if workspace.stored(vault, drafts_key(slug)):
+            return {}, (
+                f"Saved drafts for this survey are stored but could not be "
+                f"opened ({exc}) — almost always a changed encryption key. "
+                f"Nothing has been overwritten."
+            )
         return {}, ""          # not saved yet
     try:
         import json as _json
@@ -965,26 +1070,29 @@ def load_drafts(vault: Any, slug: str) -> Tuple[Dict[str, Draft], str]:
         return {}, f"Saved drafts for this survey could not be read: {exc}"
 
 
-def delete_drafts(vault: Any, slug: str) -> Tuple[bool, str]:
-    try:
-        vault.delete(drafts_key(slug))
-        return True, ""
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)
-
-
 def fingerprint(drafts: Dict[str, Draft]) -> str:
     """Cheap change detector, so an idle rerun doesn't re-upload the batch.
 
     Streamlit reruns the script on every widget interaction. Without this, every
     keystroke in a draft's text box would push the whole set to the vault.
+
+    Every field the instructor can change has to be in here. ``delivery`` was
+    not, which meant the one control that withholds an abusive comment from a
+    student — setting that student to "summary only" — changed nothing the
+    fingerprint could see, so it was never written and was gone at the next
+    sign-in, leaving the student to receive the comment the instructor had
+    deliberately held back. ``concerns`` is included for the same reason: it
+    carries the language screen's findings, and losing them loses the reason the
+    override exists.
     """
     import hashlib
     parts = []
     for key in sorted((drafts or {})):
         d = drafts[key]
         parts.append(f"{key}|{d.approved}|{d.error}|{len(d.edited)}|"
-                     f"{hash(d.edited)}|{len(d.text())}|{d.score}")
+                     f"{hash(d.edited)}|{len(d.text())}|{d.score}|"
+                     f"{d.delivery}|{d.cleared}|{len(d.concerns)}|"
+                     f"{'|'.join(sorted(c.severity for c in d.concerns))}")
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -1095,10 +1203,11 @@ def generate_for_teams(
         src = build_source(m, include_ratings=settings.include_ratings)
         try:
             drafts[m.key] = generate_draft(client, src, settings)
-        except AuthLLMError as exc:
+        except (AuthLLMError, BillingLLMError, QuotaLLMError) as exc:
             # Stop here. Every remaining student would fail the same way, and
-            # forty copies of one credential error is worse than one — it hides
-            # the answer instead of delivering it. Whatever finished is kept.
+            # forty copies of one credential, billing or allowance error is
+            # worse than one — it hides the answer instead of delivering it.
+            # Whatever finished is kept.
             raise BatchAborted(str(exc), drafts) from exc
 
     return drafts

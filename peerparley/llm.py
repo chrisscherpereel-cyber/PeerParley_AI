@@ -42,6 +42,36 @@ class TransientLLMError(LLMError):
     """Rate limits, overloads, timeouts — worth retrying."""
 
 
+class BillingLLMError(LLMError):
+    """The account cannot pay for the request.
+
+    Its own type for the same reason ``AuthLLMError`` is: it is *global*, not
+    per-student. An exhausted balance says nothing about student fourteen in
+    particular and everything about all of them, so the batch stops at the
+    first one instead of producing the same message forty times.
+
+    Distinct from auth because the remedy is different and specific: add
+    credits, or ask for fewer tokens. OpenRouter pre-authorises ``max_tokens``
+    against the remaining balance *before* generating, so a request can be
+    refused outright while a smaller one would have gone through — which is
+    worth saying, because the obvious reading of "out of credits" is that
+    nothing will work.
+    """
+
+
+class QuotaLLMError(LLMError):
+    """A free allowance for the day (or the hour) is used up.
+
+    Global, like billing and auth: student fourteen's request did not exhaust an
+    allowance that student fifteen then has. It arrives as a 429, which is
+    indistinguishable at the transport level from the per-minute rate limit that
+    *is* worth retrying — so it is identified by its wording and then kept well
+    away from the retry ladder, because four backoff attempts per student
+    against an allowance that resets tomorrow is nine minutes of sleeping for
+    nothing.
+    """
+
+
 class AuthLLMError(LLMError):
     """The provider rejected the credential.
 
@@ -147,6 +177,28 @@ FREE_TIER_DAILY = 50              # without ever purchasing credits
 FREE_TIER_DAILY_WITH_CREDITS = 1000   # after a one-time purchase of 10+ credits
 
 
+def affordable_tokens(credits: Optional[float], model: str) -> Optional[int]:
+    """How many output tokens a balance covers for this model, or None.
+
+    None when it cannot be worked out — no balance reported, or no published
+    price. Guessing either would produce a confident number with nothing behind
+    it, and this figure is used to tell the instructor whether a batch can run.
+    """
+    if credits is None or credits < 0:
+        return None
+    rate = PRICING.get(model)
+    if not rate:
+        return None
+    per_token = rate[1] / 1e6
+    if per_token <= 0:
+        return None                 # free model: the balance is not the limit
+    # The epsilon corrects binary representation error before flooring: a
+    # balance that covers exactly 680 tokens computes as 679.9999999999999,
+    # and reporting 679 would disagree with OpenRouter's own figure for no
+    # reason an instructor could ever diagnose.
+    return int(credits / per_token + 1e-6)
+
+
 def is_free_model(model: str) -> bool:
     """Does this slug bill at zero on OpenRouter?
 
@@ -202,7 +254,10 @@ class LLMClient:
 
     provider: str
     model: str
-    api_key: str = ""
+    # repr=False so the key cannot reach a screen or a log through an ordinary
+    # f-string or st.write of the object. Nothing prints these today; this is
+    # the cheap way to keep that true as the code changes.
+    api_key: str = field(default="", repr=False)
     temperature: float = 0.2
     max_tokens: int = 1600
     usage: Usage = field(default_factory=Usage)
@@ -327,14 +382,74 @@ class LLMClient:
             # the same truncated reply and bills for it again.
             raise
         except Exception as exc:
-            # Auth is checked first: some providers return 401 with wording that
-            # also matches a transient marker ("connection"), and retrying a
-            # rejected key four times with backoff just makes the failure slow.
+            # Billing before auth, and both before transient: a 402 mentions
+            # credits, some 401s do too, and retrying either one four times
+            # with backoff only makes a certain failure slow.
+            if _is_billing(exc):
+                raise BillingLLMError(self._billing_help(exc, tokens)) from exc
             if _is_auth(exc):
                 raise AuthLLMError(self._auth_help(exc)) from exc
+            if _is_quota(exc):
+                raise QuotaLLMError(self._quota_help(exc)) from exc
             if _is_transient(exc):
                 raise TransientLLMError(str(exc)) from exc
             raise LLMError(f"{self.spec.label} request failed: {exc}") from exc
+
+    def _billing_help(self, exc: Exception, tokens: int) -> str:
+        """Turn a 402 into the two things that actually fix it."""
+        detail = str(exc)
+        affordable = None
+        match = re.search(r"can only afford (\d+)", detail)
+        if match:
+            try:
+                affordable = int(match.group(1))
+            except ValueError:
+                affordable = None
+
+        lines = [f"{self.spec.label} refused the request: the account does not "
+                 "have enough credit to pay for it."]
+        if affordable is not None:
+            lines.append(
+                f"It pre-authorises the reply cap before generating, so asking "
+                f"for up to {tokens:,} tokens was refused outright even though "
+                f"the balance covers about {affordable:,}."
+            )
+            if affordable >= 800:
+                lines.append(
+                    f"Lowering the reply size limit to around {affordable:,} "
+                    "would let it through, though a narrative may then be cut "
+                    "short."
+                )
+            else:
+                lines.append(
+                    "That is too little for a usable narrative, so lowering the "
+                    "limit will not rescue this run."
+                )
+        lines.append(
+            "Add credits at https://openrouter.ai/settings/credits, or switch to "
+            "a free model — those draw on the free daily allowance rather than "
+            "your balance."
+        )
+        return " ".join(lines)
+
+    def _quota_help(self, exc: Exception) -> str:
+        """Say which allowance ran out and what the instructor can do today."""
+        detail = str(exc).strip()
+        lines = [f"{self.spec.label} has no free requests left for today."]
+        if is_free_model(self.model):
+            lines.append(
+                f"Free models share a daily allowance ({FREE_TIER_DAILY} requests, "
+                f"or {FREE_TIER_DAILY_WITH_CREDITS:,} once an account has ever bought "
+                f"$10 of credit). Drafts already written are kept — the rest can be "
+                f"drafted tomorrow with the 'draft only the ones left' button."
+            )
+        lines.append(
+            "To finish this section today, add credits and pick a paid model; "
+            "otherwise come back after the allowance resets."
+        )
+        if detail:
+            lines.append(f"({detail})")
+        return " ".join(lines)
 
     def _auth_help(self, exc: Exception) -> str:
         """Turn a provider's auth rejection into something actionable."""
@@ -627,8 +742,82 @@ def salvage_object_fields(raw: str) -> Dict[str, Any]:
 # Every provider phrases a bad credential differently. OpenRouter in particular
 # answers "User not found." for a key it does not recognise, which reads like a
 # problem with the *student* rather than the key — so it is worth translating.
-_AUTH_MARKERS = (
-    "401", "403", "user not found", "invalid api key", "invalid_api_key",
+# 402 and its wording. Checked before the auth markers because some providers
+# mention "credits" in a 401 body too, and the remedies are different.
+#
+# Status codes are matched as *codes*, never as text. The earlier version looked
+# for the bare string "402" anywhere in the message, and provider messages are
+# full of numbers: "maximum context length is 8192 tokens, however you requested
+# 14025 tokens" contains "402", so an ordinary bad-request error aborted the
+# whole batch telling the instructor to buy credits they already had. The
+# structured code on the exception is used when the SDK provides one, and the
+# fallback regex refuses to match digits that sit inside a longer number.
+
+_CODE_ATTRS = ("status_code", "http_status", "status")
+
+
+def _status_code(exc: Exception) -> Optional[int]:
+    """The HTTP status the provider actually returned, when the SDK exposes it."""
+    for attr in _CODE_ATTRS:
+        try:
+            value = int(getattr(exc, attr))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if 100 <= value <= 599:
+            return value
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            value = int(getattr(response, "status_code"))
+            if 100 <= value <= 599:
+                return value
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return None
+
+
+def _has_code(exc: Exception, text: str, codes: Sequence[int]) -> bool:
+    code = _status_code(exc)
+    if code is not None:
+        # A known code is the whole answer: do not then go looking for digits in
+        # the prose, which is how a 400 became a 402.
+        return code in codes
+    return any(re.search(rf"(?<!\d){c}(?!\d)", text) for c in codes)
+
+
+_BILLING_PHRASES = (
+    "requires more credits", "insufficient credits",
+    "insufficient_quota", "insufficient balance", "exceeded your current quota",
+    "add credits", "payment required", "billing",
+)
+
+
+def _is_billing(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return _has_code(exc, text, (402,)) or any(p in text for p in _BILLING_PHRASES)
+
+
+# A free-tier *daily* allowance answers 429, exactly like a per-minute rate
+# limit, and the two could not be told apart — so an exhausted allowance was
+# retried four times with backoff for every remaining student: 160 doomed
+# requests and nine minutes of sleeping for a 40-student batch. A day's
+# allowance is global and nothing but time or credit fixes it, so it stops the
+# batch on the first student instead.
+_QUOTA_PHRASES = (
+    "per-day", "per day", "requests per day", "daily limit", "daily quota",
+    "free-models-per-day", "limit exceeded for the day", "quota for today",
+)
+
+
+def _is_quota(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    if not any(p in text for p in _QUOTA_PHRASES):
+        return False
+    return _has_code(exc, text, (429,)) or "rate limit" in text or "quota" in text
+
+
+_AUTH_PHRASES = (
+    "user not found", "invalid api key", "invalid_api_key",
     "incorrect api key", "no auth credentials", "unauthorized",
     "authentication", "api key not valid", "invalid authentication",
     "permission_denied", "invalid x-api-key",
@@ -639,7 +828,7 @@ def _is_auth(exc: Exception) -> bool:
     text = f"{type(exc).__name__} {exc}".lower()
     # A 403 can also mean "region blocked" or "model not allowed", but the fix
     # in every case starts with the credential, so it lands here.
-    return any(m in text for m in _AUTH_MARKERS)
+    return _has_code(exc, text, (401, 403)) or any(p in text for p in _AUTH_PHRASES)
 
 
 def salvage_partial_strings(raw: str, keys: Sequence[str]) -> Dict[str, str]:

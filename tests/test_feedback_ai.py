@@ -252,13 +252,23 @@ def test_overstated_agreement_is_flagged_but_only_mildly(student, settings):
 
 
 def test_too_short_citation_is_not_evidence(student, settings):
+    """A four-letter citation is flagged — but as unverifiable, not invented.
+
+    It used to be reported as "cites a comment that does not appear in this
+    student's feedback", which is an accusation the check cannot support: the
+    word may well be in there. The honest flag is that there is too little text
+    to check. It still keeps the draft out of bulk approval, which is what the
+    flag is for.
+    """
     payload = dict(GOOD_PAYLOAD)
     payload["strength_points"] = [
         {"point": "You were helpful.", "source": "good", "raised_by": 1}]
     payload["focus_points"] = []
     client = FakeClient(payload)
     draft = fai.generate_draft(client, fai.build_source(student), settings)
-    assert draft.high_severity
+    assert not draft.clean
+    assert any("too little text" in f.problem for f in draft.flags)
+    assert not draft.high_severity
 
 
 # --------------------------------------------------------------------------- #
@@ -2045,20 +2055,687 @@ def test_comments_only_suppresses_an_approved_narrative():
     assert fai.approved_narratives({"a": d}) == {"a": "Approved text."}
 
 
+def _checked_draft(key: str, name: str) -> fai.Draft:
+    """A draft in the state a real one reaches: points cited, citations checked.
+
+    Hand-built drafts used to count as `clean` with no points at all, which is
+    the hole `Draft.clean` was tightened to close — so a test about language
+    concerns has to build drafts that are otherwise genuinely clean, or it would
+    be asserting the hole.
+    """
+    d = fai.Draft(key=key, name=name, team="1", strengths="Text.")
+    d.strength_points = [fai.Point(point="Reliable.", source="On time", raised_by=1,
+                                  quote_match=1.0, quote_ok=True)]
+    d.quotes_checked = True
+    return d
+
+
 def test_batch_stats_counts_blocked_and_flagged_language():
-    blocked = fai.Draft(key="a", name="A", team="1", strengths="Text.")
+    blocked = _checked_draft("a", "A")
     blocked.concerns = [safety.Concern(text="kys", reason="threat",
                                        severity="severe")]
-    moderate = fai.Draft(key="b", name="B", team="1", strengths="Text.")
+    moderate = _checked_draft("b", "B")
     moderate.concerns = [safety.Concern(text="idiot", reason="insult",
                                         severity="moderate")]
-    mild = fai.Draft(key="c", name="C", team="1", strengths="Text.")
+    mild = _checked_draft("c", "C")
     mild.concerns = [safety.Concern(text="lazy", reason="harsh",
                                     severity="mild")]
-    clean = fai.Draft(key="d", name="D", team="1", strengths="Text.")
+    clean = _checked_draft("d", "D")
 
     st = fai.batch_stats({"a": blocked, "b": moderate, "c": mild, "d": clean})
     assert st["blocked"] == 1
     assert st["flagged_language"] == 2          # severe + moderate, not mild
     assert clean.clean and mild.clean           # mild does not block approval
     assert not blocked.clean and not moderate.clean
+
+
+# --------------------------------------------------------------------------- #
+# Running out of credit (a live 402 across a whole batch)
+# --------------------------------------------------------------------------- #
+
+from peerparley.llm import (  # noqa: E402
+    BillingLLMError,
+    _is_billing,
+    affordable_tokens,
+)
+
+REAL_402 = ("Error code: 402 - {'error': {'message': 'This request requires "
+            "more credits, or fewer max_tokens. You requested up to 4000 "
+            "tokens, but can only afford 680.', 'code': 402}}")
+
+
+def test_a_402_is_classified_as_billing_not_as_a_generic_failure():
+    from peerparley.llm import _is_auth, _is_transient
+    assert _is_billing(Exception(REAL_402))
+    # And it must not be retried: the balance will not change on retry.
+    assert not _is_transient(Exception(REAL_402))
+    for other in ("insufficient_quota", "Payment Required",
+                  "add credits to continue"):
+        assert _is_billing(Exception(other)), other
+    # Ordinary failures are not billing failures.
+    assert not _is_billing(Exception("429 rate limit exceeded"))
+    assert not _is_billing(Exception("500 internal error"))
+
+
+def test_billing_failures_abort_the_batch_like_auth_failures():
+    """Four students failing for one exhausted balance is one fact, not four."""
+    from peerparley.grading import TeamResult
+
+    members = []
+    for i in range(6):
+        m = make_student(name=f"Student {i}", key=f"s{i}")
+        m.contributions = ["Built the model and explained it to everyone twice."]
+        m.improvements = ["Sends updates late in the evening."]
+        members.append(m)
+    teams = [TeamResult(team="1", members=members, team_score=100.0)]
+
+    class OutOfCredit(FakeClient):
+        def complete_json(self, system, user, max_tokens=None):
+            self.prompts.append((system, user))
+            raise BillingLLMError("balance exhausted")
+
+    client = OutOfCredit()
+    settings = AISettings(enabled=True, provider="openrouter",
+                          model="openai/gpt-4.1-mini", api_key="sk-or-x",
+                          verify=False)
+    with pytest.raises(fai.BatchAborted):
+        fai.generate_for_teams(teams, settings, client=client)
+    assert len(client.prompts) == 1      # stopped at the first, not the sixth
+
+
+def test_the_402_message_names_both_remedies():
+    from peerparley.llm import LLMClient
+    from peerparley.aiconfig import get_provider
+    c = LLMClient.__new__(LLMClient)
+    c.spec = get_provider("openrouter")
+    text = c._billing_help(Exception(REAL_402), 4000)
+
+    assert "not have enough credit" in text
+    assert "680" in text                 # what the balance actually covers
+    assert "4,000" in text               # and what was asked for
+    assert "credits" in text and "free model" in text
+    # 680 is too little to rescue, so it must not suggest lowering the cap.
+    assert "would let it through" not in text
+
+
+def test_the_402_message_suggests_a_lower_cap_when_that_would_work():
+    from peerparley.llm import LLMClient
+    from peerparley.aiconfig import get_provider
+    c = LLMClient.__new__(LLMClient)
+    c.spec = get_provider("openrouter")
+    plenty = ("Error code: 402 - requires more credits, or fewer max_tokens. "
+              "You requested up to 8000 tokens, but can only afford 3500.")
+    text = c._billing_help(Exception(plenty), 8000)
+    assert "3,500" in text and "would let it through" in text
+
+
+def test_affordable_tokens_matches_openrouters_own_arithmetic():
+    """OpenRouter said 680; the app should land in the same place."""
+    from peerparley.llm import PRICING
+    PRICING["test/nano"] = (0.10, 0.40)        # $0.40 per M output
+    assert affordable_tokens(0.000272, "test/nano") == 680
+    assert affordable_tokens(0.50, "test/nano") == 1_250_000
+    # Unknowable cases return None rather than a confident guess.
+    assert affordable_tokens(None, "test/nano") is None
+    assert affordable_tokens(1.0, "model/with-no-published-price") is None
+    assert affordable_tokens(0.5, "openrouter/free") is None   # free: not the limit
+
+
+def test_an_unaffordable_model_is_not_reported_as_suitable():
+    """The screenshot: "Should handle this" beside a hard 402."""
+    from peerparley.llm import PRICING
+    PRICING["test/nano"] = (0.10, 0.40)
+    model = parse_models({"data": [
+        {"id": "test/nano", "name": "nano", "context_length": 1000000,
+         "pricing": {"prompt": "0.0000001", "completion": "0.0000004"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["response_format", "structured_outputs"],
+         "top_provider": {"max_completion_tokens": 32768}}]})[0]
+
+    # Capable, and with credit it is genuinely suitable.
+    assert advisor.assess(model, reply_tokens=4000,
+                          credits_remaining=0.50).verdict == "suitable"
+
+    # With the balance from the screenshot it cannot run at all.
+    broke = advisor.assess(model, reply_tokens=4000, credits_remaining=0.000272)
+    assert broke.verdict == "unusable"
+    assert broke.unaffordable
+    assert "Not enough credit" in broke.headline()
+    assert any("balance" in r for r in broke.reasons)
+    assert any("free model" in w for w in broke.warnings)
+
+    # Enough to run, but under the cap: a warning, not a ban.
+    tight = advisor.assess(model, reply_tokens=4000, credits_remaining=0.0015)
+    assert tight.verdict == "risky"
+    assert any("under the" in w for w in tight.warnings)
+
+    # Balance unknown: judged on capability alone, as before.
+    assert advisor.assess(model, reply_tokens=4000).verdict == "suitable"
+
+
+def test_an_unaffordable_model_is_not_recommended():
+    from peerparley.llm import PRICING
+    PRICING["test/cheap"] = (0.10, 0.40)
+    PRICING["test/dear"] = (10.0, 40.0)
+    models = parse_models({"data": [
+        {"id": "test/dear", "name": "dear", "context_length": 200000,
+         "pricing": {"prompt": "0.00001", "completion": "0.00004"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["structured_outputs"],
+         "top_provider": {"max_completion_tokens": 64000}},
+        {"id": "test/cheap", "name": "cheap", "context_length": 200000,
+         "pricing": {"prompt": "0.0000001", "completion": "0.0000004"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["structured_outputs"],
+         "top_provider": {"max_completion_tokens": 32000}},
+    ]})
+    # A balance that covers the cheap model but not the dear one.
+    rec = advisor.recommend(models, reply_tokens=4000, credits_remaining=0.01)
+    assert rec["paid"].model == "test/cheap"
+
+    # A balance that covers neither leaves no paid recommendation at all.
+    assert advisor.recommend(models, reply_tokens=4000,
+                             credits_remaining=0.0000001)["paid"] is None
+
+
+def test_free_models_are_never_judged_on_the_balance():
+    """They draw on the daily allowance, not on credit."""
+    model = parse_models({"data": [
+        {"id": "some/free:free", "name": "free", "context_length": 200000,
+         "pricing": {"prompt": "0", "completion": "0"},
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["structured_outputs"],
+         "top_provider": {"max_completion_tokens": 32000}}]})[0]
+    a = advisor.assess(model, reply_tokens=4000, credits_remaining=0.0)
+    assert a.verdict == "suitable" and not a.unaffordable
+
+
+# --------------------------------------------------------------------------- #
+# The local-model picker's view of a probe
+# --------------------------------------------------------------------------- #
+# These exist because of a shipped bug: the mapping below lived inside a
+# Streamlit-cached wrapper, where no test could reach it, and it read a
+# ``status`` attribute that LocalServer does not have. Choosing "On this
+# computer" raised AttributeError and — because the sidebar renders before
+# every tab — took the whole page down with it. The mapping is now a plain
+# function, and these tests cover all three states a probe can return.
+
+from peerparley import ai_ui  # noqa: E402
+from peerparley import localmodels  # noqa: E402
+
+
+def test_local_server_has_no_status_attribute():
+    """The guard for the exact mistake that shipped.
+
+    If a future refactor adds a ``status`` field, this test fails loudly rather
+    than letting the two spellings drift apart again.
+    """
+    server = localmodels.LocalServer(base_url="http://localhost:11434/v1")
+    assert not hasattr(server, "status")
+    assert callable(server.status_line)
+
+
+def test_an_unreachable_server_maps_to_an_unusable_state():
+    server = localmodels.LocalServer(
+        base_url="http://localhost:11434/v1", label="Ollama",
+        detail="Nothing is listening on port 11434.")
+    state = ai_ui._local_server_state(server)
+    assert state["usable"] is False
+    assert state["reachable"] is False
+    assert state["models"] == []
+    assert state["status"] == "Nothing is listening on port 11434."
+    assert state["label"] == "Ollama"
+
+
+def test_a_running_server_with_no_models_is_not_usable():
+    """Reachable is not the same as ready, and the message has to say which."""
+    server = localmodels.LocalServer(
+        base_url="http://localhost:11434/v1", label="Ollama", reachable=True)
+    state = ai_ui._local_server_state(server)
+    assert state["usable"] is False
+    assert state["reachable"] is True
+    assert "no models are downloaded yet" in state["status"]
+
+
+def test_a_ready_server_maps_to_its_model_list():
+    server = localmodels.LocalServer(
+        base_url="http://localhost:11434/v1", label="Ollama", reachable=True,
+        models=["llama3.1:8b", "qwen2.5:14b"])
+    state = ai_ui._local_server_state(server)
+    assert state["usable"] is True
+    assert state["models"] == ["llama3.1:8b", "qwen2.5:14b"]
+    assert state["status"] == "Ollama · 2 models ready"
+
+
+def test_the_state_is_a_copy_not_the_servers_own_list():
+    """The picker mutates nothing, but a cached dict sharing a list would be a
+    trap waiting for the first person who does."""
+    server = localmodels.LocalServer(
+        base_url="http://localhost:11434/v1", reachable=True, models=["a"])
+    state = ai_ui._local_server_state(server)
+    state["models"].append("b")
+    assert server.models == ["a"]
+
+
+def test_a_probe_that_raises_still_returns_the_shape_the_picker_reads():
+    """A probe is a question about the outside world; it must never be able to
+    take down the page that asked it."""
+    def boom(_url):
+        raise RuntimeError("socket exploded")
+
+    ok = ai_ui._local_server_state(localmodels.LocalServer(
+        base_url="x", reachable=True, models=["m"], label="Ollama"))
+    fallback = ai_ui._probe_local.__wrapped__("http://localhost:9/v1")
+    assert set(fallback) == set(ok), "fallback must not omit a key the picker reads"
+
+    original = localmodels.probe
+    localmodels.probe = boom
+    try:
+        state = ai_ui._probe_local.__wrapped__("http://localhost:11434/v1")
+    finally:
+        localmodels.probe = original
+    assert state["usable"] is False
+    assert "socket exploded" in state["status"]
+    assert set(state) == set(ok)
+
+
+# --------------------------------------------------------------------------- #
+# v2.9 — the audit release
+# --------------------------------------------------------------------------- #
+# Each test below is tied to a specific defect found while reviewing the whole
+# application, and each names what used to happen. They are the record of why
+# these behaviours are the way they are.
+
+from peerparley import grading as grd  # noqa: E402
+from peerparley import survey as svy  # noqa: E402
+from peerparley import workspace as wsp  # noqa: E402
+from peerparley.llm import QuotaLLMError, _is_auth, _is_billing, _is_quota  # noqa: E402
+
+
+def _rows(spec, team="T1", comment="{ee} carried the analysis and met every deadline."):
+    """evaluator -> {evaluatee: dollars} as the tidy frame compute() consumes."""
+    import pandas as pd
+    out = []
+    for ev, gives in spec.items():
+        for ee, pts in gives.items():
+            out.append(dict(evaluator=ev, evaluator_key=ev.lower(), evaluator_team=team,
+                            evaluatee=ee, evaluatee_key=ee.lower(), points=pts,
+                            public_comment=comment.format(ee=ee)))
+    return pd.DataFrame(out)
+
+
+# ---- the AI writer is off by default, and stays off ----------------------- #
+
+def test_enabling_the_ai_writer_is_never_remembered():
+    """It must be a deliberate act every session.
+
+    Remembering "on" would mean an instructor who tried it once in March finds
+    it armed in September, spending on an API account and sending student
+    comments to a vendor because of a click they have forgotten.
+    """
+    from peerparley.aiconfig import SETTINGS_FIELDS
+    assert "enabled" not in SETTINGS_FIELDS
+    assert "api_key" not in SETTINGS_FIELDS
+    assert AISettings().enabled is False
+
+
+def test_saved_settings_restore_everything_except_the_switch():
+    class _V:
+        def __init__(self): self.store = {}
+        def put_bytes(self, name, data): self.store[name] = data
+        def get_bytes(self, name): return self.store[name]
+
+    from peerparley.aiconfig import load_settings, save_settings
+    v = _V()
+    s = AISettings(enabled=True, provider="anthropic", model="claude-x",
+                   tone="direct", api_key="sk-secret")
+    assert save_settings(v, "chris", s)[0]
+    back = load_settings(v, "chris")
+    assert back.provider == "anthropic" and back.model == "claude-x"
+    assert back.tone == "direct"
+    assert back.enabled is False            # the switch does not come back
+    assert back.api_key == ""               # nor does the key
+    assert b"sk-secret" not in v.store["aisettings__chris.json"]
+
+
+# ---- grading: a student nobody evaluated ---------------------------------- #
+
+def test_a_student_nobody_rated_keeps_the_team_score():
+    """They used to be scored as if every teammate gave them $0 — the maximum
+    deduction — and their zero dragged the team average down for everyone."""
+    teams = grd.compute(_rows({"Ann": {"Bob": 33, "Cid": 33, "Dee": 34}}),
+                        grd.GradeSettings())
+    by_name = {m.name: m for t in teams for m in t.members}
+    ann = by_name["Ann"]
+    assert ann.no_peer_input is True
+    assert ann.multiplier == 1.0 and ann.signed_pct == 0.0
+    assert ann.individual_score == 100.0
+    assert ann.performance == grd.NO_DATA
+    assert ann.pay_grade != ann.pay_grade          # nan: no share to report
+    # And Ann is not in the average the others are measured against.
+    assert all(0.9 <= by_name[n].pay_grade <= 1.1 for n in ("Bob", "Cid", "Dee"))
+
+
+def test_the_instructor_is_told_who_was_never_evaluated():
+    df = _rows({"Ann": {"Bob": 33, "Cid": 33, "Dee": 34}})
+    teams = grd.compute(df, grd.GradeSettings())
+    warnings = grd.data_warnings(df, teams)
+    assert any("No teammate evaluated" in w and "Ann" in w for w in warnings)
+
+
+def test_a_student_on_two_teams_is_reported_not_silently_merged():
+    import pandas as pd
+    df = pd.concat([_rows({"Ann": {"Bob": 50, "Cid": 50}}, team="T1"),
+                    _rows({"Ann": {"Eve": 100}}, team="T2")], ignore_index=True)
+    assert any("more than one team" in w for w in grd.data_warnings(df, None))
+
+
+def test_names_missing_from_the_contact_list_are_reported():
+    df = _rows({"Ann Apple": {"Bob Brown": 50, "Ann Aple": 50}})
+    warnings = grd.data_warnings(df, None,
+                                 roster_names=["Ann Apple", "Bob Brown"])
+    assert any("Ann Aple" in w for w in warnings)
+
+
+def test_wholly_different_name_formats_are_reported_as_that():
+    """Not as a list of forty typos, which would bury the actual problem."""
+    df = _rows({"Ann": {"Bob": 50, "Cid": 50}})
+    warnings = grd.data_warnings(df, None, roster_names=["Ann Apple", "Bob Brown",
+                                                         "Cid Cole"])
+    assert any("writing names differently" in w for w in warnings)
+
+
+# ---- grading: rounding decides the grade --------------------------------- #
+
+def test_the_rounded_adjustment_is_the_one_applied():
+    """A student used to be told "+5%" while the gradebook held 104.44."""
+    df = _rows({"Ann": {"Bob": 34, "Cid": 33, "Dee": 33},
+                "Bob": {"Ann": 40, "Cid": 30, "Dee": 30},
+                "Cid": {"Ann": 38, "Bob": 34, "Dee": 28},
+                "Dee": {"Ann": 36, "Bob": 34, "Cid": 30}})
+    for step in (1, 5):
+        teams = grd.compute(df, grd.GradeSettings(rounding_step=step))
+        for t in teams:
+            for m in t.members:
+                assert abs(m.individual_score - (m.team_score + m.signed_pct)) < 1e-9
+                assert abs(m.signed_pct % step) < 1e-9
+                # multiplier times team score has to land on the same number
+                assert abs(m.multiplier * m.team_score - m.individual_score) < 1e-6
+
+
+def test_a_zero_adjustment_never_renders_as_minus_zero():
+    """`-0.0` passed the `>= 0` test, so the label read "+-0%"."""
+    teams = grd.compute(_rows({"Ann": {"Bob": 50, "Cid": 50},
+                               "Bob": {"Ann": 50, "Cid": 50},
+                               "Cid": {"Ann": 50, "Bob": 50}}),
+                        grd.GradeSettings())
+    frame = grd.results_to_frame(teams)
+    assert not any(str(v).startswith("+-") for v in frame["Grade Δ"])
+
+
+def test_the_adjustment_cap_still_holds_after_rounding():
+    """Rounding happens before the cap is re-applied, so a +4.9% that rounds to
+    +5% is fine, but nothing may exceed what the instructor set."""
+    df = _rows({"Ann": {"Bob": 90, "Cid": 5, "Dee": 5},
+                "Bob": {"Ann": 90, "Cid": 5, "Dee": 5},
+                "Cid": {"Ann": 90, "Bob": 5, "Dee": 5},
+                "Dee": {"Ann": 90, "Bob": 5, "Cid": 5}},
+               comment="{ee} did their part of the project to a reasonable standard.")
+    teams = grd.compute(df, grd.GradeSettings(rounding_step=5, sensitivity_B=1.5))
+    for t in teams:
+        for m in t.members:
+            assert -50.0 <= m.signed_pct <= 5.0
+
+
+# ---- grading: the leniency correction stays on the same scale ------------- #
+
+def test_the_leniency_correction_is_a_no_op_when_raters_agree():
+    df = _rows({"Ann": {"Bob": 40, "Cid": 30, "Dee": 30},
+                "Bob": {"Ann": 40, "Cid": 30, "Dee": 30},
+                "Cid": {"Ann": 40, "Bob": 30, "Dee": 30},
+                "Dee": {"Ann": 40, "Bob": 30, "Cid": 30}})
+    off = grd.compute(df, grd.GradeSettings(normalize_raters=False))
+    on = grd.compute(df, grd.GradeSettings(normalize_raters=True))
+    for ta, tb in zip(off, on):
+        for ma, mb in zip(ta.members, tb.members):
+            assert abs(ma.individual_score - mb.individual_score) < 1e-6
+
+
+def test_the_leniency_correction_keeps_adjustments_inside_the_caps():
+    """It used to feed a standard score where a ratio was expected, which put
+    the adjustment on a different scale: one extreme rater could swing a
+    teammate from +0% to -35% and reorder the team."""
+    df = _rows({"Ann": {"Bob": 34, "Cid": 33, "Dee": 33},
+                "Bob": {"Ann": 34, "Cid": 33, "Dee": 33},
+                "Cid": {"Ann": 60, "Bob": 20, "Dee": 20},
+                "Dee": {"Ann": 34, "Bob": 33, "Cid": 33}})
+    teams = grd.compute(df, grd.GradeSettings(normalize_raters=True))
+    for t in teams:
+        for m in t.members:
+            assert -50.0 <= m.signed_pct <= 5.0
+
+
+# ---- grading: bad input that used to crash or mislead --------------------- #
+
+def test_an_allocation_column_that_did_not_parse_does_not_crash():
+    """A renamed Qualtrics question left every cell unparseable; the column
+    stayed object dtype and float(None) took the results tab down."""
+    df = _rows({"Ann": {"Bob": 33, "Cid": 33}})
+    df["points"] = [None, None]
+    teams = grd.compute(df, grd.GradeSettings())
+    assert teams and all(m.no_peer_input for t in teams for m in t.members)
+
+
+def test_the_grade_bands_are_evenly_spaced():
+    """0.78 for B- made that band twice as wide as every other and B a sliver."""
+    assert grd.letter_grade(0.714) == "B"
+    assert grd.letter_grade(0.70) == "B-"
+    assert grd.letter_grade(0.79) == "B+"
+    thresholds = [thr for thr, _ in grd.GRADE_SCALE if 0.36 <= thr <= 0.78]
+    gaps = {round(b - a, 2) for a, b in zip(thresholds, thresholds[1:])}
+    assert gaps == {0.07}
+
+
+def test_a_confidential_note_is_filed_under_its_author():
+    """One free-text box per submission, parked on the first teammate's row by
+    both intake paths — so it used to read as evidence *about* that teammate."""
+    df = _rows({"Ann": {"Bob": 50, "Cid": 50}})
+    df.loc[0, "confidential_comment"] = "I did most of the work myself."
+    df.loc[1, "confidential_comment"] = ""
+    teams = grd.compute(df, grd.GradeSettings())
+    by_name = {m.name: m for t in teams for m in t.members}
+    assert by_name["Ann"].confidential_comments == ["I did most of the work myself."]
+    assert by_name["Bob"].confidential_comments == []
+
+
+# ---- the survey form: the $100 goes to teammates ------------------------- #
+
+def test_the_hundred_dollars_is_required_across_teammates_only():
+    """The form collected a self-allocation, required it in the $100, and then
+    threw it away — so withholding dollars lowered every teammate for free."""
+    answers = {"0": {"alloc": 0}, "1": {"alloc": 50}, "2": {"alloc": 50}}
+    cfg = {"ask_ratings": False, "ask_ranking": False, "ask_allocation": True,
+           "points_total": 100}
+    assert svy.submission_problems(answers, cfg, 3, self_pos=0) == []
+    # Keeping $40 back no longer balances: the teammates must still total 100.
+    answers = {"0": {"alloc": 40}, "1": {"alloc": 30}, "2": {"alloc": 30}}
+    problems = svy.submission_problems(answers, cfg, 3, self_pos=0)
+    assert problems and "100" in problems[0]
+
+
+# ---- persistence ---------------------------------------------------------- #
+
+def test_a_delivery_override_changes_the_fingerprint():
+    """The one control that withholds an abusive comment from a student was
+    outside the autosave guard, so it was never written and was gone by the
+    next sign-in."""
+    d = fai.Draft(key="a", name="A", team="1", strengths="Text.")
+    before = fai.fingerprint({"a": d})
+    d.delivery = "summary"
+    assert fai.fingerprint({"a": d}) != before
+
+
+def test_clearing_a_draft_means_no_narrative_not_the_original():
+    """An empty `edited` already meant "as generated", so clearing the box and
+    approving shipped the model's text — the opposite of what clearing says."""
+    d = fai.Draft(key="a", name="A", team="1", strengths="Generated text.")
+    d.approved = True
+    assert fai.approved_narratives({"a": d}) == {"a": "Generated text."}
+    d.cleared = True
+    assert d.text() == ""
+    assert fai.approved_narratives({"a": d}) == {}
+    # And it survives the vault round trip.
+    assert fai.Draft.from_dict(d.to_dict()).cleared is True
+
+
+def test_an_unreadable_saved_session_is_reported_not_called_absent():
+    """Decryption happens inside get_bytes, so a changed key looked like "never
+    saved" — and the next autosave then overwrote the only copy."""
+    class _V:
+        def list(self): return [wsp.workspace_key("chris")]
+        def get_bytes(self, name): raise RuntimeError("Could not decrypt")
+        def put_bytes(self, name, data): raise AssertionError("must not write")
+    state, err = wsp.load(_V(), "chris")
+    assert state is None
+    assert "could not be opened" in err and "encryption key" in err
+
+
+def test_nothing_stored_still_reports_nothing_at_all():
+    class _V:
+        def list(self): return []
+        def get_bytes(self, name): raise RuntimeError("not found")
+    assert wsp.load(_V(), "chris") == (None, "")
+
+
+def test_grading_settings_survive_a_save_and_load():
+    """A resumed session used to regrade at the defaults, silently."""
+    import dataclasses
+    import pandas as pd
+
+    class _V:
+        def __init__(self): self.store = {}
+        def put_bytes(self, name, data): self.store[name] = data
+        def get_bytes(self, name): return self.store[name]
+        def list(self): return list(self.store)
+
+    v = _V()
+    df = pd.DataFrame([{"evaluator_key": "a", "evaluatee_key": "b", "points": 50}])
+    s = grd.GradeSettings(sensitivity_B=0.8, rounding_step=1, normalize_raters=True)
+    ok, err = wsp.save(v, "chris", long_df=df, settings=dataclasses.asdict(s))
+    assert ok, err
+    state, err = wsp.load(v, "chris")
+    assert not err
+    assert grd.GradeSettings(**state["settings"]) == s
+
+
+# ---- provider errors ----------------------------------------------------- #
+
+def test_a_token_count_containing_402_is_not_a_billing_failure():
+    """"you requested 14025 tokens" contains "402", and a bare substring match
+    aborted the batch telling the instructor to buy credits they already had."""
+    exc = RuntimeError("maximum context length is 8192 tokens, however you "
+                       "requested 14025 tokens")
+    assert not _is_billing(exc)
+    exc401 = RuntimeError("requested 14012 tokens")
+    assert not _is_auth(exc401)
+
+
+def test_a_real_402_is_still_a_billing_failure():
+    assert _is_billing(RuntimeError("Error code: 402 - requires more credits"))
+    assert _is_billing(RuntimeError("insufficient credits"))
+
+
+def test_a_structured_status_code_beats_the_prose():
+    class _Err(Exception):
+        status_code = 400
+    assert not _is_billing(_Err("you requested 14025 tokens"))
+
+    class _Billing(Exception):
+        status_code = 402
+    assert _is_billing(_Billing("no detail at all"))
+
+
+def test_a_spent_daily_allowance_is_its_own_global_failure():
+    """It arrives as a 429, indistinguishable from the per-minute rate limit
+    that *is* worth retrying — so it was retried four times per student: 160
+    doomed requests for a 40-student batch."""
+    exc = RuntimeError("Rate limit exceeded: free-models-per-day")
+    assert _is_quota(exc)
+    assert not _is_quota(RuntimeError("Rate limit exceeded: 20 requests per minute"))
+    assert issubclass(QuotaLLMError, LLMError)
+
+
+def test_the_batch_stops_on_a_spent_allowance_and_keeps_what_finished(
+        student, settings):
+    from peerparley.grading import TeamResult
+    import copy
+    second = copy.deepcopy(student)
+    second.name, second.key = "Sam Vega", "sam-vega"
+    teams = [TeamResult(team="B", members=[student, second], team_score=100.0)]
+    calls = {"n": 0}
+
+    class _Client(FakeClient):
+        def complete_json(self, system, user, max_tokens=None):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise QuotaLLMError("no free requests left today")
+            return super().complete_json(system, user, max_tokens)
+
+    client = _Client(GOOD_PAYLOAD)
+    with pytest.raises(fai.BatchAborted) as caught:
+        fai.generate_for_teams(teams, settings, client=client)
+    assert len(caught.value.drafts) == 1          # the first student is kept
+    assert calls["n"] == 2                        # it stopped at the failure
+
+
+# ---- the citation check -------------------------------------------------- #
+
+def test_a_real_quote_with_invented_advice_bolted_on_is_flagged_high():
+    """Containment in the wrong direction scored it a perfect 1.00: a real
+    comment wearing an invented recommendation passed every check."""
+    pool = ["Always on time and well prepared for every meeting."]
+    draft = fai.Draft(key="a", name="A", team="1", strengths="Prompt.")
+    draft.strength_points = [fai.Point(
+        point="You were prompt.",
+        source=("Always on time and well prepared for every meeting, and she told "
+                "us we should set up a shared Gantt chart for the next project."),
+        raised_by=1)]
+    src = fai.FeedbackSource(key="a", name="A", team="1", valued=pool)
+    fai.check_quotes(draft, src)
+    assert draft.high_severity
+    assert any("adds words to it" in f.problem for f in draft.flags)
+
+
+def test_a_terse_whole_comment_counts_as_a_real_citation():
+    """"On time" is somebody's entire comment in plenty of sections; calling a
+    verbatim copy of it fabricated teaches the instructor to ignore the flags."""
+    pool = ["On time", "Quiet in meetings"]
+    draft = fai.Draft(key="a", name="A", team="1", strengths="Prompt.")
+    draft.strength_points = [fai.Point(point="You were prompt.",
+                                       source="On time", raised_by=1)]
+    src = fai.FeedbackSource(key="a", name="A", team="1", valued=pool)
+    fai.check_quotes(draft, src)
+    assert draft.strength_points[0].quote_ok
+    assert not draft.flags
+
+
+def test_a_draft_with_no_sourced_points_is_not_clean():
+    """Paragraphs with no points gave the citation check nothing to check, so
+    it raised no flags and scored 1.0 — and read as "Grounded"."""
+    d = fai.Draft(key="a", name="A", team="1",
+                  strengths="You were a reliable teammate all semester.")
+    d.quotes_checked = True
+    d.score = 1.0
+    assert not d.clean
+
+
+def test_a_failed_draft_is_still_screened_for_abusive_language(student, settings):
+    """The student's own report falls back to the raw comments, so those reach
+    them either way — and a comment needing an instructor's eyes needs them
+    most when there is no AI output to look at."""
+    student.public_comments = ["He is an idiot and should not be in this programme."]
+    student.contributions = list(student.public_comments)
+    src = fai.build_source(student)
+    draft = fai._failed(src, settings, "the request timed out")
+    assert draft.concerns
+    assert fai.batch_stats({"a": draft})["flagged_language"] == 1

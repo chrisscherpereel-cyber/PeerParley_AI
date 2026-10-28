@@ -216,19 +216,32 @@ class Assessment:
     def usable(self) -> bool:
         return self.verdict != "unusable"
 
+    @property
+    def unaffordable(self) -> bool:
+        return any("balance" in r for r in self.reasons)
+
     def headline(self) -> str:
+        if self.unaffordable:
+            return "Not enough credit to run this"
         return {"suitable": "Should handle this",
                 "risky": "Might struggle",
                 "unusable": "Cannot do this job"}.get(self.verdict, self.verdict)
 
 
 def assess(model: ORModel, *, reply_tokens: int = 4000,
-           record: Optional[ModelRecord] = None) -> Assessment:
+           record: Optional[ModelRecord] = None,
+           credits_remaining: Optional[float] = None) -> Assessment:
     """Judge one model against what this task actually needs.
 
     The task: read a handful of short comments and return a small JSON object
     holding a few paragraphs and their sourced points. Undemanding in context,
     genuinely demanding in format discipline.
+
+    ``credits_remaining`` is the account balance when it is known. A model the
+    account cannot pay for is unusable however capable it is — a verdict that
+    ignored the balance produced "✅ Should handle this" beside a hard 402,
+    which is exactly the kind of confident wrongness this module exists to
+    avoid.
     """
     reasons: List[str] = []
     warnings: List[str] = []
@@ -276,6 +289,34 @@ def assess(model: ORModel, *, reply_tokens: int = 4000,
     elif model.context_length >= 32000:
         score += 1.0
 
+    # ---- can the account actually pay for it? ---------------------------
+    # Checked before capability is discussed, because affordability overrides
+    # it: OpenRouter pre-authorises the reply cap against the balance and
+    # refuses the whole request, so a capable model with no credit behind it
+    # simply cannot run.
+    if not model.is_free and credits_remaining is not None:
+        from .llm import affordable_tokens
+        budget = affordable_tokens(credits_remaining, model.id)
+        if budget is not None and budget < MIN_USEFUL_OUTPUT_TOKENS:
+            verdict = "unusable"
+            reasons.append(
+                f"your OpenRouter balance (${credits_remaining:.4f}) covers only "
+                f"about {budget:,} output tokens — the request would be refused "
+                f"before the model ran"
+            )
+            warnings.append(
+                "Add credits, or pick a free model: those draw on the free "
+                "daily allowance rather than your balance."
+            )
+            score -= 10.0
+        elif budget is not None and budget < reply_tokens:
+            if verdict == "suitable":
+                verdict = "risky"
+            warnings.append(
+                f"your balance covers about {budget:,} output tokens, under the "
+                f"{reply_tokens:,} reply cap — lower the cap or add credits"
+            )
+
     # ---- price and rate limits ------------------------------------------
     if model.is_free:
         warnings.append(
@@ -308,11 +349,14 @@ def assess(model: ORModel, *, reply_tokens: int = 4000,
 
 
 def assess_all(models: Sequence[ORModel], *, reply_tokens: int = 4000,
-               records: Optional[Dict[str, ModelRecord]] = None
+               records: Optional[Dict[str, ModelRecord]] = None,
+               credits_remaining: Optional[float] = None
                ) -> Dict[str, Assessment]:
     records = records or {}
     return {m.id: assess(m, reply_tokens=reply_tokens,
-                         record=records.get(m.id)) for m in models}
+                         record=records.get(m.id),
+                         credits_remaining=credits_remaining)
+            for m in models}
 
 
 # --------------------------------------------------------------------------- #
@@ -320,7 +364,8 @@ def assess_all(models: Sequence[ORModel], *, reply_tokens: int = 4000,
 # --------------------------------------------------------------------------- #
 
 def recommend(models: Sequence[ORModel], *, reply_tokens: int = 4000,
-              records: Optional[Dict[str, ModelRecord]] = None
+              records: Optional[Dict[str, ModelRecord]] = None,
+              credits_remaining: Optional[float] = None
               ) -> Dict[str, Optional[Assessment]]:
     """Best free and best paid candidate for this task.
 
@@ -332,7 +377,8 @@ def recommend(models: Sequence[ORModel], *, reply_tokens: int = 4000,
     Ties break toward the cheaper model, so a recommendation never costs more
     than it needs to.
     """
-    graded = assess_all(models, reply_tokens=reply_tokens, records=records)
+    graded = assess_all(models, reply_tokens=reply_tokens, records=records,
+                        credits_remaining=credits_remaining)
     by_id = {m.id: m for m in models}
 
     def _best(free: bool) -> Optional[Assessment]:
@@ -357,7 +403,8 @@ def recommend(models: Sequence[ORModel], *, reply_tokens: int = 4000,
 
 
 def usable_only(models: Sequence[ORModel], *, reply_tokens: int = 4000,
-                records: Optional[Dict[str, ModelRecord]] = None
+                records: Optional[Dict[str, ModelRecord]] = None,
+                credits_remaining: Optional[float] = None
                 ) -> List[ORModel]:
     """The models worth offering, with the hopeless ones removed.
 
@@ -366,6 +413,7 @@ def usable_only(models: Sequence[ORModel], *, reply_tokens: int = 4000,
     wrong or missing, and silently hiding a model the instructor asked for would
     be its own kind of failure.
     """
-    graded = assess_all(models, reply_tokens=reply_tokens, records=records)
+    graded = assess_all(models, reply_tokens=reply_tokens, records=records,
+                        credits_remaining=credits_remaining)
     return [m for m in models
             if m.id == "openrouter/free" or graded[m.id].usable]

@@ -13,7 +13,28 @@ university-controlled storage vault (Microsoft 365, Dropbox, or pCloud).
 **New in v2:** an optional **AI feedback writer** turns each student's raw peer
 comments into a readable narrative — grounded in those comments and nothing
 else, checked automatically for invented claims, and released only after you
-approve it. Off by default. See **`docs/AI_FEEDBACK.md`**.
+approve it. Off by default, and off again every time you sign in. See
+**`docs/AI_FEEDBACK.md`**.
+
+### If someone has just handed you this app
+
+Sign in, and open **Start here** at the top of the page. It is a five-step
+checklist ticked off from what you have actually done, and each unfinished step
+names the one button that completes it. You need a contact list — names, emails
+and teams, one row per student — and nothing else; the template is on tab ①.
+Three things are worth knowing before you click:
+
+* **Save the survey before you email anybody.** Until you do, a student opening
+  their link is told the evaluation is not available. The app blocks sending
+  until then, and tells you.
+* **Don't change the student list after answers start arriving.** Each link
+  points at a student's place in the saved list, so adding or removing someone
+  would hand their answers to a teammate. PeerParley refuses the save and says
+  so; use a new evaluation number for a changed roster.
+* **Nothing reaches a student until you click a button that says it will.**
+  Every send button names its audience and how many; the ones that discard work
+  ask first. The AI writer, if you turn it on, drafts for your review and
+  nothing it writes is sent without your approval.
 
 ---
 
@@ -105,7 +126,7 @@ sidebar, then switch it on there. Full guide: **`docs/AI_FEEDBACK.md`**.
 ### Tests
 
 ```bash
-python3 -m pytest tests/ -q     # 141 unit tests, fully offline
+python3 -m pytest tests/ -q     # 185 unit tests, fully offline
 python3 qa_regression.py        # 80 end-to-end checks via Streamlit AppTest
 ```
 
@@ -158,8 +179,8 @@ See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
 │   ├── safety.py              # v2: abusive-language screen for comments + summaries
 │   └── ai_ui.py               # v2: sidebar settings, model pickers, review panel
 ├── tests/
-│   └── test_feedback_ai.py    # 141 offline tests; no API key needed
-├── qa_regression.py           # headless AppTest harness (80 checks)
+│   └── test_feedback_ai.py    # 185 offline tests; no API key needed
+├── qa_regression.py           # headless AppTest harness (90 checks)
 ├── docs/
 │   └── AI_FEEDBACK.md         # the AI writer: rules, setup, cost, audit trail
 ├── GRADING.md

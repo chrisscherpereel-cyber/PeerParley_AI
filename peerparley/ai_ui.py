@@ -38,6 +38,7 @@ from .llm import (
     FREE_TIER_RPM,
     estimate_cost,
     has_pricing,
+    affordable_tokens,
     is_free_model,
     register_pricing,
 )
@@ -59,18 +60,23 @@ SETTINGS_KEY = "ai_settings"
 # OpenRouter model catalog
 # --------------------------------------------------------------------------- #
 
-@st.cache_data(ttl=3600, show_spinner="Loading the OpenRouter model list…")
-def _openrouter_catalog(_nonce: int = 0):
-    """The live catalog, refreshed hourly.
+# A note on busting these caches, because the obvious way does not work:
+# Streamlit leaves underscore-prefixed parameters OUT of the cache key, so the
+# `_nonce` arguments these functions used to take could not invalidate anything
+# — `f(1)` returned whatever `f(0)` had cached. Refreshing worked only because
+# of the explicit `.clear()` calls, and `_key_status`, which had no `.clear()`,
+# never refreshed at all: a key the instructor had just fixed kept showing the
+# old error until the TTL expired. The nonces are gone; `.clear()` is the
+# mechanism.
 
-    ``_nonce`` is unused by the function — bumping it is how the refresh button
-    busts Streamlit's cache without waiting out the hour.
-    """
+@st.cache_data(ttl=3600, show_spinner="Loading the list of available AI models…")
+def _openrouter_catalog():
+    """The live catalog, refreshed hourly or by the Refresh button."""
     return load_models()
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _key_status(api_key: str, _nonce: int = 0):
+def _key_status(api_key: str):
     """Ask OpenRouter about the key. Cached briefly so it isn't re-asked per rerun."""
     return fetch_key_status(api_key)
 
@@ -83,8 +89,7 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
     so a baked-in list would offer retired models and hide new ones. Ported from
     TransQ, which reached the same conclusion for the same reason.
     """
-    nonce = st.session_state.setdefault("ai_catalog_nonce", 0)
-    catalog, warning = _openrouter_catalog(nonce)
+    catalog, warning = _openrouter_catalog()
 
     # Live prices beat the static table, so the cost meter quotes what
     # OpenRouter charges today.
@@ -95,7 +100,7 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
 
     # ---- what the key itself says, before anything is spent -------------
     if api_key:
-        status = _key_status(api_key, st.session_state.get("ai_key_nonce", 0))
+        status = _key_status(api_key)
         if not status.valid:
             st.error(status.error, icon="🔑")
         else:
@@ -111,12 +116,16 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
             st.success(" · ".join(bits), icon="🔑")
             st.session_state["ai_free_remaining"] = (
                 status.free_remaining if status.free_known else None)
+            st.session_state["ai_credits"] = status.credits_remaining
 
     records = advisor.load_records(vault) if vault is not None else {}
+    # A capable model the account cannot pay for is not a usable model, so the
+    # balance is part of every judgement below.
+    credits = st.session_state.get("ai_credits")
 
     # ---- recommendations, from capability plus observed history ---------
     rec = advisor.recommend(list(catalog), reply_tokens=reply_tokens,
-                            records=records)
+                            records=records, credits_remaining=credits)
     if rec["free"] or rec["paid"]:
         with st.expander("💡 Recommended for this task", expanded=False):
             st.caption(
@@ -160,7 +169,7 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
     )
 
     pool = (advisor.usable_only(list(catalog), reply_tokens=reply_tokens,
-                                records=records)
+                                records=records, credits_remaining=credits)
             if only_usable else list(catalog))
     hidden = len(catalog) - len(pool)
     shown = [
@@ -192,7 +201,8 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
     picked = next((m for m in catalog if m.id == selected), None)
     if picked is not None:
         a = advisor.assess(picked, reply_tokens=reply_tokens,
-                           record=records.get(picked.id))
+                           record=records.get(picked.id),
+                           credits_remaining=credits)
         st.markdown(f"{a.icon} **{a.headline()}**")
         for r in a.reasons:
             st.caption(f"　+ {r}")
@@ -201,12 +211,14 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
 
     c1, c2 = st.columns(2)
     if c1.button("↻ Refresh list", use_container_width=True, key="ai_or_refresh"):
-        st.session_state["ai_catalog_nonce"] = nonce + 1
         _openrouter_catalog.clear()
+        _key_status.clear()
         st.rerun()
     custom = c2.text_input(
-        "Or a slug", value="", placeholder="vendor/model", key="ai_or_custom",
-        help="Anything not in the list — a brand-new model, or a variant.",
+        "Enter a model name instead", value="", placeholder="vendor/model",
+        key="ai_or_custom",
+        help="Only needed for a model too new to be in the list. Leave this "
+             "empty to use the one chosen above.",
     ).strip()
 
     return custom or selected
@@ -216,11 +228,37 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
 # Local model picker
 # --------------------------------------------------------------------------- #
 
+def _local_server_state(server: "localmodels.LocalServer") -> Dict[str, Any]:
+    """Flatten a probe result into the plain dict the picker renders from.
+
+    Its own function so it can be tested. It previously lived inside the
+    Streamlit-cached wrapper below, where no test could reach it — and it
+    contained a call to a ``status`` attribute that does not exist
+    (``LocalServer`` exposes ``status_line()``), which took the whole sidebar
+    down with an AttributeError the moment anyone chose "On this computer".
+
+    Nothing here touches the network or Streamlit, so the mapping is now
+    covered by ordinary unit tests.
+    """
+    return {
+        "usable": bool(server.is_usable),
+        "models": list(server.models),
+        "status": server.status_line(),
+        "label": server.label,
+        "reachable": bool(server.reachable),
+    }
+
+
 @st.cache_data(ttl=60, show_spinner=False)
-def _probe_local(base_url: str, _nonce: int = 0) -> Dict[str, Any]:
-    server = localmodels.probe(base_url)
-    return {"usable": server.is_usable, "models": list(server.models),
-            "status": server.status, "label": server.label}
+def _probe_local(base_url: str) -> Dict[str, Any]:
+    try:
+        return _local_server_state(localmodels.probe(base_url))
+    except Exception as exc:  # noqa: BLE001
+        # A probe is a question about the outside world; it must never be able
+        # to take down the page that asked it.
+        return {"usable": False, "models": [], "label": "",
+                "reachable": False,
+                "status": f"Could not check for a local server: {exc}"}
 
 
 def _local_model_picker(current_url: str, saved_model: str) -> tuple:
@@ -255,17 +293,15 @@ def _local_model_picker(current_url: str, saved_model: str) -> tuple:
     )
     base_url = localmodels.normalise(base_url)
 
-    nonce = st.session_state.setdefault("ai_local_nonce", 0)
     left, right = st.columns([1, 1])
     if left.button("Check again", use_container_width=True, key="ai_local_recheck"):
-        st.session_state["ai_local_nonce"] = nonce + 1
         _probe_local.clear()
         st.rerun()
     mem = localmodels.available_memory_gb()
     if mem:
         right.caption(localmodels.guidance(mem))
 
-    server = _probe_local(base_url, nonce)
+    server = _probe_local(base_url)
 
     if not server["usable"]:
         st.error(server["status"], icon="🔌")
@@ -320,13 +356,17 @@ def sidebar_settings(vault=None, username: str = "") -> AISettings:
     st.divider()
     st.markdown("### 🤖 AI feedback writer")
     s.enabled = st.toggle(
-        "Enable", value=s.enabled, key="ai_enabled",
-        help="Turns on the optional step that rewrites each student's peer "
-             "comments into a readable narrative. Off by default; grading and "
-             "every other part of PeerParley work exactly the same without it.",
+        "Draft summaries with AI", value=s.enabled, key="ai_enabled",
+        help="Optional. Turns on a step that rewrites each student's peer "
+             "comments into a short narrative for you to read and approve "
+             "before any student sees it. Grading and every other part of "
+             "PeerParley work exactly the same without it. It starts off every "
+             "time you sign in, on purpose: it sends comments to an outside AI "
+             "service and can cost money, so it is never left armed for you.",
     )
     if not s.enabled:
-        st.caption("Off — student PDFs show the raw comment bullets only.")
+        st.caption("Off. Students' reports show their teammates' comments as "
+                   "written. Nothing is sent anywhere.")
         st.session_state[SETTINGS_KEY] = s
         return s
 
@@ -346,14 +386,33 @@ def sidebar_settings(vault=None, username: str = "") -> AISettings:
     # hundreds of models that change weekly and must be fetched; a local server
     # has whatever happens to be installed on that machine; the rest have a
     # short, stable roster that fits in a dropdown.
+    # The two rich pickers reach out to a network or to a local server, and a
+    # fault in either used to take the whole app down — the sidebar renders
+    # before every tab, so an exception here loses the page rather than the
+    # feature. They fall back to a plain text box instead.
     if s.provider == "openrouter":
         seed = s.model if s.model else (spec.models[0] if spec.models else "")
-        s.model = _openrouter_model_picker(
-            seed, reply_tokens=s.max_tokens, vault=vault,
-            api_key=s.resolved_api_key())
+        try:
+            s.model = _openrouter_model_picker(
+                seed, reply_tokens=s.max_tokens, vault=vault,
+                api_key=s.resolved_api_key())
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"The model picker failed to load: {exc}", icon="⚠️")
+            s.model = st.text_input(
+                "Model", value=seed, key="ai_model_fallback",
+                help="The picker could not load, so type a slug directly.",
+            ).strip() or seed
     elif spec.is_local:
-        s.local_base_url, s.model = _local_model_picker(
-            s.local_base_url, s.model if s.provider == "local" else "")
+        try:
+            s.local_base_url, s.model = _local_model_picker(
+                s.local_base_url, s.model if s.provider == "local" else "")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not check your local server: {exc}", icon="⚠️")
+            s.model = st.text_input(
+                "Model name", value=s.model, key="ai_model_local_fallback",
+                placeholder="llama3.1:8b",
+                help="Whatever `ollama list` shows on this machine.",
+            ).strip()
     else:
         models = list(spec.models)
         default_model = s.model if s.model in models else models[0]
@@ -684,7 +743,8 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
               "Every student already has a draft."),
     )
     run_all = g2.button(
-        f"Redo all {len(members)}", key="ai_gen_all",
+        (f"Redo all {len(members)} (discards {len(done)})" if done
+         else f"Draft all {len(members)}"), key="ai_gen_all",
         type="primary" if not drafts else "secondary",
         help=("Regenerates every student from scratch, discarding all "
               f"{len(done)} finished draft(s) along with every edit and "
@@ -703,6 +763,34 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         # Free tier has a hard daily ceiling, and a forty-student batch with the
         # audit on is 80 requests — which silently exceeds it. Better to show
         # the arithmetic before the batch than to discover it at student 25.
+        if (settings.provider == "openrouter"
+                and not is_free_model(settings.model)):
+            # Paid model: the balance, not the daily cap, is the limit. And
+            # OpenRouter pre-authorises the reply cap per request, so a balance
+            # that cannot cover one request fails every one of them.
+            bal = st.session_state.get("ai_credits")
+            budget = affordable_tokens(bal, settings.model)
+            if budget is not None and budget < settings.max_tokens:
+                st.error(
+                    f"**Your OpenRouter balance (${bal:.4f}) covers about "
+                    f"{budget:,} output tokens, but each request asks for up to "
+                    f"{settings.max_tokens:,}.** OpenRouter pre-authorises that "
+                    "cap before generating, so every request will be refused "
+                    "with a 402 — not just the last one."
+                    + (f" Lowering the reply size limit to {budget:,} would let "
+                       "them through." if budget >= 800 else
+                       " That is too little for a usable narrative, so lowering "
+                       "the limit will not help.")
+                    + " Add credits at openrouter.ai/settings/credits, or "
+                      "switch to a free model.",
+                    icon="💳",
+                )
+            elif budget is not None:
+                runs = budget // max(settings.max_tokens, 1)
+                st.caption(
+                    f"${bal:.4f} on this key · about {runs:,} request(s) at the "
+                    f"current reply cap")
+
         if settings.provider == "openrouter" and is_free_model(settings.model):
             need = len(todo or members) * per
             # The key check reports today's actual remaining allowance, which
@@ -752,8 +840,29 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
     if regen:
         targets = [regen]
         st.info(f"Redrafting one student…", icon="↻")
+    elif run_all and done:
+        # Redoing everything throws away finished drafts, the edits on them and
+        # the approvals. One stray click should not be able to do that, so it
+        # asks — and the question names what would be lost.
+        st.session_state["ai_confirm_redo"] = True
     elif run_all:
         targets = [m.key for m in members]
+
+    if st.session_state.get("ai_confirm_redo"):
+        st.warning(
+            f"Redraft all {len(members)} students? This discards {len(done)} "
+            f"finished draft(s) along with your edits and approvals on them, and "
+            f"spends {len(members) * fai.calls_per_student(settings)} AI "
+            f"request(s). To fill in only what is missing, use the other button.",
+            icon="♻️",
+        )
+        r1, r2 = st.columns(2)
+        if r1.button("Yes, redraft everyone", key="ai_redo_yes", type="primary"):
+            st.session_state["ai_confirm_redo"] = False
+            targets = [m.key for m in members]
+        if r2.button("Cancel", key="ai_redo_no"):
+            st.session_state["ai_confirm_redo"] = False
+            st.rerun()
     elif run_rest:
         targets = missing + failed
 
@@ -913,19 +1022,35 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         )
 
     a1, a2, a3 = st.columns([1.4, 1.2, 1.6])
-    if a1.button(f"✅ Approve the {stats['clean']} clean draft(s)",
+    if a1.button(f"✅ Approve {stats['clean']} draft(s) without reading them",
                  key="ai_approve_clean", disabled=not stats["clean"],
-                 help="Only drafts with no flag at all. Anything flagged has to "
-                      "be opened and read."):
+                 help="These passed every automatic check: each point traces to "
+                      "a real comment, nothing was flagged, and no comment "
+                      "needs your eyes. The checks cannot tell you whether the "
+                      "summary is fair, which is why the label says what it "
+                      "says."):
         for d in drafts.values():
             if d.clean and d.score >= settings.verify_threshold:
                 d.approved = True
         st.rerun()
-    if a2.button("Clear all approvals", key="ai_unapprove",
-                 disabled=not stats["approved"]):
-        for d in drafts.values():
-            d.approved = False
-        st.rerun()
+    if a2.button(f"Un-approve all {stats['approved']}", key="ai_unapprove",
+                 disabled=not stats["approved"],
+                 help="Removes every approval, including ones you made in an "
+                      "earlier session. Your edits to the text are kept."):
+        st.session_state["ai_confirm_unapprove"] = True
+    if st.session_state.get("ai_confirm_unapprove"):
+        st.warning(f"Remove all {stats['approved']} approval(s)? The drafts and "
+                   f"your edits stay; only the approvals go.", icon="↩️")
+        u1, u2 = st.columns(2)
+        if u1.button("Yes, un-approve them", key="ai_unapprove_yes",
+                     type="primary"):
+            for d in drafts.values():
+                d.approved = False
+            st.session_state["ai_confirm_unapprove"] = False
+            st.rerun()
+        if u2.button("Keep them", key="ai_unapprove_no"):
+            st.session_state["ai_confirm_unapprove"] = False
+            st.rerun()
     a3.download_button(
         "⬇ Audit trail (JSON)",
         json.dumps({
@@ -949,9 +1074,16 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         "would not have written yourself."
     )
 
+    # Off by default, deliberately. It used to default to on whenever anything
+    # was flagged, which opened the panel showing two drafts and hid thirty-eight
+    # — and the bulk-approve button then signed off text nobody had seen. For a
+    # feature whose whole premise is human review, hiding the drafts by default
+    # defeats it.
     only_flagged = st.checkbox(
-        "Show only drafts needing attention", value=bool(stats["high"]),
+        "Show only the drafts that need attention", value=False,
         key="ai_filter_flagged",
+        help=f"Hides the {stats['clean']} that passed every check. Useful once "
+             f"you have read them.",
     )
 
     by_key = {m.key: m for m in members}
@@ -1040,11 +1172,11 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                 elif picked == "none":
                     st.caption("Numbers only for this student.")
             with dl2:
-                if st.button("↻ Regenerate", key=f"ai_regen_{m.key}",
+                if st.button("↻ Rewrite from scratch", key=f"ai_regen_{m.key}",
                              use_container_width=True,
-                             help="Redraft this student alone. Discards the "
-                                  "current draft along with any edits and the "
-                                  "approval on it."):
+                             help="Drafts this student again and throws away "
+                                  "what is there now, including your edits and "
+                                  "the approval. Costs one or two AI requests."):
                     st.session_state["ai_regen_key"] = m.key
 
             left, right = st.columns([1.15, 1])
@@ -1056,13 +1188,27 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                         "approving — the end may be missing."
                     )
                 st.markdown("**Draft — edit as you like**")
+                # Emptying the box means "no narrative for this student", and
+                # that has to stick: the box cannot quietly refill itself with
+                # the model's text on the next rerun, or clearing it would be
+                # undone by the act of clicking anything else.
+                shown = "" if d.cleared else (d.edited or d.text())
                 edited = st.text_area(
-                    "Narrative", value=d.edited or d.text(),
+                    "Narrative", value=shown,
                     key=f"ai_text_{m.key}", height=260,
                     label_visibility="collapsed",
                 )
-                if edited.strip() != (d.edited or d.text()).strip():
-                    d.edited = edited
+                if edited.strip() != shown.strip():
+                    if edited.strip():
+                        d.edited, d.cleared = edited, False
+                    else:
+                        d.edited, d.cleared = "", True
+                if d.cleared:
+                    st.caption(
+                        "Empty — this student's report will show their "
+                        "teammates' comments only, with no summary. Type "
+                        "something here to put a summary back."
+                    )
                 approve = st.checkbox(
                     "Approve — include this in the student's PDF",
                     value=d.approved, key=f"ai_ok_{m.key}",

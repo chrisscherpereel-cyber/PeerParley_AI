@@ -85,3 +85,10 @@ def logout() -> None:
     for k in list(st.session_state.keys()):
         if str(k).startswith("pp_"):
             del st.session_state[k]
+    # The AI writer is off by default and must also be off for whoever signs in
+    # next. A Streamlit widget with a key keeps its own value across reruns and
+    # ignores the `value=` argument once that key exists, so without this the
+    # toggle would stay on through a sign-out — the next instructor would find
+    # it armed, spending on an API account they did not set up.
+    for k in ("ai_enabled", "ai_settings", "ai_settings_loaded_for"):
+        st.session_state.pop(k, None)

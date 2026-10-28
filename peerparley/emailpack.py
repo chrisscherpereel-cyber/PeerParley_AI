@@ -116,6 +116,28 @@ def _eml(part: dict) -> bytes:
     return msg.as_bytes()
 
 
+def message_items(messages) -> List[Tuple[str, bytes]]:
+    """Ready-to-send .eml files from already-rendered Message objects.
+
+    This is what "prepare them for me to look over first" hands back on SMTP,
+    which has no drafts folder of its own: the same promise as an Outlook draft
+    — nothing has gone out yet — kept by a mechanism SMTP can actually honour.
+    """
+    out: List[Tuple[str, bytes]] = []
+    seen: dict = {}
+    for m in messages:
+        name = _safe(getattr(m, "to_name", "") or getattr(m, "to_email", "") or "message")
+        seen[name] = seen.get(name, 0) + 1
+        suffix = "" if seen[name] == 1 else f"_{seen[name]}"
+        out.append((f"{name}{suffix}.eml", _eml({
+            "to": getattr(m, "to_email", ""),
+            "subject": getattr(m, "subject", ""),
+            "body": getattr(m, "body", ""),
+            "attachments": list(getattr(m, "attachments", []) or []),
+        })))
+    return out
+
+
 def invite_items(recipients, subject_t, body_t, course, eval_no, from_addr="") -> List[Tuple[str, bytes]]:
     return [(f"{_safe(p['name'])}.eml", _eml(p))
             for p in invite_parts(recipients, subject_t, body_t, course, eval_no)]
