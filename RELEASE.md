@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 233 passed
+python3 -m pytest tests/ -q          # expect: 237 passed
 python3 qa_regression.py             # expect: 93/93 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
@@ -20,6 +20,20 @@ python3 selfcheck.py                 # expect: exit 0 on a configured install
 | `tests/test_first_run.py` | a brand-new installation: the setup screen, the file it writes, signing in with the chosen password, the dependency bounds, and that no secret or student file is in the repository |
 | `tests/test_delivery_and_clock.py` | the delivery defaults, that the review option is offered on every method and that the auto-send pack's review mode writes drafts instead of sending, the detected app address, and the scheduling clock |
 | `qa_regression.py` | the real app driven headless through Streamlit's test runner: grading, PDFs, email packs, the AI review panel, the setup gate |
+| `tests/_rerun_cost.py` | what one rerun costs in storage round trips, with a 40-student section loaded — the number that decides whether the app feels fast on a cloud store, and the one a local timing cannot see |
+
+## 1a. Performance, measured rather than felt
+
+```bash
+python3 tests/_rerun_cost.py /tmp/ppcost     # expect: 0–4 round trips, PASS
+```
+
+Streamlit re-runs the whole script on every click, so the question is not how
+fast a function is but how much work a rerun repeats. The number that matters is
+**storage round trips per rerun**: on a laptop each one is free, and on Microsoft
+365 or Dropbox each is an HTTPS request of 100–300ms. One rerun of a 40-student
+section cost 52 of them before 2.12.0 and costs 0 now. If a change makes the app
+feel slow again, run this first.
 
 ## 2. The install path a new user takes
 

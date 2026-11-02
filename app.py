@@ -898,7 +898,7 @@ def _start_here(course: str, eval_no: str) -> None:
     have_url = bool((S.get("inv_url") or getattr(cfg, "public_url", "")
                      or _this_app_url() or "").strip())
     try:
-        responses = len(survey.all_responses(vault_now(), slug_now)) if saved else 0
+        responses = survey.response_count(vault_now(), slug_now) if saved else 0
     except Exception:  # noqa: BLE001
         responses = 0
     loaded = "long_df" in S
@@ -1430,7 +1430,10 @@ with tabs[1]:
     status = [] if _blocked else _response_status(slug)
     if not _blocked:
         if st.button("↻ Check for new responses", key="resp_refresh"):
+            # Both layers: the progress table's own cache, and the vault's
+            # short-lived read cache that makes every other click fast.
             _response_status.clear()
+            vault_now().refresh()
             st.rerun()
     if _blocked:
         st.error(f"This section belongs to another instructor (`{_owner or 'unowned'}`). "
@@ -1764,7 +1767,15 @@ with tabs[3]:
                                      f"peerparley_{course or 'section'}_eval{eval_no}.zip",
                                      "application/zip")
 
-            with st.expander("Preview a student PDF"):
+            # Opt-in, like the instructor previews: the body of an expander runs
+            # whether or not it is open, so this was building a PDF and
+            # rasterising every page of it on every rerun — measured at a tenth
+            # of a second and a few hundred kilobytes pushed to the browser,
+            # for a panel nobody had opened.
+            if st.checkbox("Preview one student's report on screen",
+                           key="prev_student",
+                           help="Builds and shows one report. The zip above has "
+                                "all of them."):
                 names = [f"{t.team} · {m.name}" for t in teams for m in t.members]
                 pick = st.selectbox("Student", names) if names else None
                 if pick:

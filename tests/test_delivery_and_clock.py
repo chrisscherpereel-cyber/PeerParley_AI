@@ -16,6 +16,8 @@ import re
 import sys
 import zipfile
 
+from cryptography.fernet import Fernet
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -303,3 +305,131 @@ def test_no_module_passes_the_retired_argument_directly():
             if "use_container_width=" in line and not line.lstrip().startswith("#"):
                 assert "_detect_width_kwargs" in text, \
                     f"{path.name} passes use_container_width directly: {line.strip()}"
+
+
+# --------------------------------------------------------------------------- #
+# 6. What a rerun costs
+# --------------------------------------------------------------------------- #
+
+def test_one_rerun_does_not_hammer_the_storage_backend(tmp_path):
+    """Reported: "still very slow when I am doing small tasks like changing the
+    schedule."
+
+    Streamlit re-executes the whole script on every click, and the script was
+    asking storage for 52 objects each time — the survey, the roster, all forty
+    responses, the account list. Invisible on a laptop; several seconds per
+    click on Microsoft 365 or Dropbox, where every read is an HTTPS round trip.
+
+    This measures round trips at the backend, below the read cache, with a full
+    40-student section loaded. The budget is deliberately tight: a change that
+    reintroduces a per-student read will break it.
+    """
+    import subprocess
+    done = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", "_rerun_cost.py"),
+         str(tmp_path / "cost"), "--budget", "4"],
+        capture_output=True, text=True, timeout=900)
+    assert done.returncode == 0, done.stdout[-3000:]
+    assert "PASS - one rerun stays within" in done.stdout, done.stdout[-3000:]
+
+
+def test_the_vault_remembers_reads_briefly_and_never_serves_a_stale_write(tmp_path,
+                                                                         monkeypatch):
+    """The cache that makes the above possible, and its two hard rules."""
+    from peerparley import vault as vault_mod
+    from peerparley.vault import Vault
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FERNET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("VAULT_BACKEND", "local")
+    monkeypatch.setenv("VAULT_FOLDER", "cache-test")
+    vault_mod.clear_cache()
+
+    v = Vault()
+    reads = {"n": 0}
+    original = type(v.backend).get
+
+    def counted(self, name):
+        reads["n"] += 1
+        return original(self, name)
+
+    monkeypatch.setattr(type(v.backend), "get", counted)
+
+    v.put_bytes("thing.ppj", b"first")
+    # Rule one: a write is visible at once, and costs no read.
+    assert v.get_bytes("thing.ppj") == b"first"
+    assert reads["n"] == 0, "a value just written should not be fetched back"
+
+    # Repeated reads inside the window do not reach the store.
+    v.put_bytes("other.ppj", b"x")
+    before = reads["n"]
+    for _ in range(5):
+        v.get_bytes("other.ppj")
+    assert reads["n"] == before
+
+    # Rule two: a later write of the same object replaces what is remembered.
+    v.put_bytes("thing.ppj", b"second")
+    assert v.get_bytes("thing.ppj") == b"second"
+
+    # The listing stays correct across writes and deletes without re-listing.
+    assert "thing.ppj" in v.list() and "other.ppj" in v.list()
+    v.delete("other.ppj")
+    assert "other.ppj" not in v.list()
+
+    # And refresh() means "go and look again".
+    v.refresh()
+    reads["n"] = 0
+    assert v.get_bytes("thing.ppj") == b"second"
+    assert reads["n"] == 1
+
+
+def test_two_stores_with_the_same_folder_name_do_not_share_a_cache(tmp_path,
+                                                                   monkeypatch):
+    """Found by the test suite itself: the cache key has to include the local
+    store's absolute path, or one section's data is served to another."""
+    from peerparley import vault as vault_mod
+    from peerparley.vault import Vault
+
+    monkeypatch.setenv("FERNET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("VAULT_BACKEND", "local")
+    monkeypatch.setenv("VAULT_FOLDER", "same-name")
+    vault_mod.clear_cache()
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    monkeypatch.chdir(tmp_path / "a")
+    Vault().put_bytes("shared.ppj", b"section A")
+    monkeypatch.chdir(tmp_path / "b")
+    second = Vault()
+    second.put_bytes("shared.ppj", b"section B")
+    assert second.get_bytes("shared.ppj") == b"section B"
+    monkeypatch.chdir(tmp_path / "a")
+    assert Vault().get_bytes("shared.ppj") == b"section A"
+
+
+def test_counting_responses_does_not_read_them_all(tmp_path, monkeypatch):
+    """The Start here checklist wanted this number on every rerun and used to
+    get it by fetching and decrypting all forty submissions."""
+    from peerparley import survey as svy
+    from peerparley import vault as vault_mod
+    from peerparley.vault import Vault
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FERNET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("VAULT_BACKEND", "local")
+    monkeypatch.setenv("VAULT_FOLDER", "count-test")
+    vault_mod.clear_cache()
+
+    v = Vault()
+    for pos in range(12):
+        svy.save_response(v, "c-eval1", "1", pos, {"pos": pos, "team": "1"})
+    v.refresh()
+
+    reads = {"n": 0}
+    original = type(v.backend).get
+    monkeypatch.setattr(type(v.backend), "get",
+                        lambda self, name: (reads.__setitem__("n", reads["n"] + 1),
+                                            original(self, name))[1])
+    assert svy.response_count(v, "c-eval1") == 12
+    assert reads["n"] == 0, "counting should not fetch a single response"
+    assert len(svy.all_responses(v, "c-eval1")) == 12   # this one does read them

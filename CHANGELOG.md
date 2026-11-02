@@ -1,5 +1,80 @@
 # Changelog
 
+## 2.12.0 — why small clicks were slow
+
+Reported: *"the application still seems very slow when I am doing small tasks
+like changing the schedule."* Measured before changing anything, because the
+cause was not what it felt like.
+
+### What was actually happening
+
+Streamlit re-executes the whole script on every click, keystroke and checkbox.
+Instrumented with a full 40-student section, **one rerun asked storage for 52
+objects**: the survey, the roster snapshot, all forty responses, the account
+list. On a laptop with local files that is a fifth of a second and invisible —
+which is why it survived the earlier performance pass, where I measured
+computation and never counted round trips. On Microsoft 365, Dropbox or pCloud,
+where every read is an HTTPS request of 100–300ms, the same click costs **five
+to fifteen seconds**. Changing a closing date paid for forty student responses
+to be fetched and decrypted.
+
+Forty of those reads came from one line I added in 2.9.0: the Start here
+checklist showed "Collect responses (N in so far)", and it got N by loading
+every submission.
+
+### A rerun now costs no storage round trips at all
+
+Measured the same way: **52 → 0** for a steady-state rerun and for a schedule
+change. At 150ms a call that is about eight seconds of waiting per click
+removed.
+
+* **Reads are remembered for fifteen seconds**, in `Vault` itself, so every
+  caller benefits — surveys, rosters, drafts, accounts, the workspace. Two
+  rules keep it honest: a write refreshes the entry it wrote, so a save is
+  visible immediately and never costs a read; and nothing lives longer than the
+  window, which is what keeps a student's submission — written by another
+  process — from going unnoticed. **Check for new responses** clears it
+  outright.
+* The cache key includes the store's absolute path, not just the backend name
+  and folder. The test suite caught that immediately: two local vaults with the
+  same folder name under different working directories are different stores
+  holding different students.
+* **Counting responses no longer reads them.** `survey.response_count()`
+  answers from the object names alone.
+* The storage healthcheck in the sidebar, which runs on every rerun, goes
+  through the cache too. A green badge up to fifteen seconds old is a fair
+  trade for not charging a network call per click; a store that goes away is
+  still reported inside that window.
+
+### Two other things that ran on every rerun
+
+* **A student's report was being built and rasterised** for a preview panel
+  nobody had opened — the body of a `st.expander` executes whether or not it is
+  open. It is now behind a checkbox, like the instructor previews.
+* **The AI review panel rendered all forty students at once** — each row an
+  expander holding a text box, a checkbox, a radio and three tabs, every
+  element of it rebuilt on every keystroke. It now shows ten at a time, with
+  edits and approvals kept when you move between groups.
+
+### Kept honest
+
+`magicEnabled = false` is now set, but **not** as a speed-up: Streamlit caches
+the compiled script, so its syntax-tree rewrite happens once per process rather
+than per rerun, and timing it showed no difference. It is set because this app
+never relies on magic — a test asserts that — so turning it off removes a way
+for a stray line to print something to an instructor. `fastReruns = true` does
+affect how the app feels: a rerun already in flight is abandoned when the
+instructor clicks something else.
+
+### A test that holds the line
+
+`tests/_rerun_cost.py` seeds a 40-student section, drives the real app, and
+counts round trips **at the backend, below the cache** — the number a timing on
+local disk cannot see. The budget is four; it currently measures zero, and any
+change that reintroduces a per-student read will fail it.
+
+4 new tests (237 total).
+
 ## 2.11.1 — opening a survey a second time
 
 Reported from use: *"when I open a second time the save — and make student

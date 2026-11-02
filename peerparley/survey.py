@@ -553,6 +553,20 @@ def load_response(vault: Vault, slug: str, team: str, pos: int) -> Optional[dict
         return None
 
 
+def response_count(vault: Vault, slug: str) -> int:
+    """How many students have submitted — from the object names alone.
+
+    The Start here checklist wants this number on every rerun, and it used to
+    get it by calling ``all_responses``, which fetches and decrypts all forty
+    submissions. One listing answers the same question.
+    """
+    prefix = _resp_prefix(slug)
+    try:
+        return sum(1 for n in vault.list() if str(n).startswith(prefix))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def all_responses(vault: Vault, slug: str) -> List[dict]:
     prefix = _resp_prefix(slug)
     try:

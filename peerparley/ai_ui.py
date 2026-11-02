@@ -1089,12 +1089,42 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
     )
 
     by_key = {m.key: m for m in members}
-    for m in members:
+
+    # Only a page of students at a time. Each row is an expander holding a text
+    # box, a checkbox, a radio and three tabs — and Streamlit rebuilds every
+    # element of every row on every keystroke, whether the row is open or not.
+    # Forty rows is several hundred elements per rerun, which is felt as the
+    # whole app being sluggish while the panel is on screen. Reviewing happens
+    # one student at a time anyway.
+    _shown = [m for m in members
+              if drafts.get(m.key) is not None
+              and not (only_flagged
+                       and drafts[m.key].clean
+                       and not drafts[m.key].error
+                       and not drafts[m.key].insufficient_evidence)]
+    PAGE = 10
+    if len(_shown) > PAGE:
+        pages = (len(_shown) + PAGE - 1) // PAGE
+        labels = []
+        for i in range(pages):
+            chunk = _shown[i * PAGE:(i + 1) * PAGE]
+            labels.append(f"{i * PAGE + 1}–{i * PAGE + len(chunk)}: "
+                          f"{chunk[0].name.split(' ')[0]} … "
+                          f"{chunk[-1].name.split(' ')[0]}")
+        choice = st.radio("Students", labels, horizontal=True,
+                          key="ai_review_page",
+                          help=f"{len(_shown)} to review, {PAGE} at a time. "
+                               f"Your edits and approvals are kept when you move "
+                               f"between groups.")
+        start = labels.index(choice) * PAGE
+        _page = _shown[start:start + PAGE]
+        st.caption(f"Showing {len(_page)} of {len(_shown)}. Approvals you have "
+                   f"already made on the others still count.")
+    else:
+        _page = _shown
+
+    for m in _page:
         d = drafts.get(m.key)
-        if d is None:
-            continue
-        if only_flagged and (d.clean and not d.error and not d.insufficient_evidence):
-            continue
 
         mark = ("🛑" if d.blocked else
                 "🔴" if d.high_severity else
