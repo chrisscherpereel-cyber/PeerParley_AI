@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.11.1 — opening a survey a second time
+
+Reported from use: *"when I open a second time the save — and make student
+links live is grayed out and can't be regenerated even after a schedule change,
+and the send personal links can't be regenerated and sent."*
+
+Correct, and my fault — introduced with the save guards in 2.9.0/2.10.0. Both
+sections were gated on the *uploaded* contact list, and the file uploader is
+empty when you come back to a survey you set up last week. So the page offered
+no way to change a closing date and no way to re-send a link without
+re-uploading a file that had not changed.
+
+Three fixes, all on the same idea: **the saved roster is the student list.**
+
+* **Saving works without an upload.** With a survey already stored, the button
+  reads "Save these settings" and writes the questions, the schedule, the
+  report choices and the scheduling clock while leaving the roster untouched.
+  That is also the safer of the two operations: a student's identity in a
+  submission is their position in the stored roster, so the roster is exactly
+  the thing not to rewrite once answers exist — and here it is not touched at
+  all. Uploading a list is needed only when the list itself has changed, and
+  the existing guard against re-pointing collected answers still applies then.
+* **Links are rebuilt from the saved list, always.** A link token carries a team
+  and a position *in the stored roster*, so that is what a link resolves
+  against; building links from a fresh upload could hand a student someone
+  else's form if the two had drifted. As a consequence they are available on
+  every visit, and the page says so when an uploaded list differs from the
+  saved one.
+* **The page comes back showing what was saved.** `survey_cfg` was rebuilt from
+  the factory defaults on a new session, so a returning instructor saw default
+  questions and an empty schedule — and "Save these settings" would then have
+  written those defaults over their real ones. The saved configuration is now
+  loaded once per survey, and dropped when you switch surveys.
+
+The teams preview, the student count and the no-email warning now come from the
+saved list too, so a second visit no longer looks like an unconfigured one.
+
+4 new tests (233 total), one of them driving the real page with the uploader
+empty — the reported case, which nothing covered.
+
 ## 2.11.0 — sending, and whose clock it is
 
 Four changes to how an evaluation goes out, all of them defaults or wording

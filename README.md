@@ -151,7 +151,7 @@ switch it on there. It is off every time you sign in, by design. Full guide:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/ -q     # 229 tests, fully offline
+python3 -m pytest tests/ -q     # 233 tests, fully offline
 python3 qa_regression.py        # 93 checks driving the real app, headless
 python3 selfcheck.py            # is this installation usable?
 ```

@@ -402,7 +402,10 @@ with st.sidebar:
                    # Reset the persistence bookkeeping too, so the new survey's
                    # saved drafts are restored rather than the old survey's
                    # fingerprint suppressing the load.
-                   ai_ui.FP_KEY, ai_ui.LOADED_KEY, "ai_reports"):
+                   ai_ui.FP_KEY, ai_ui.LOADED_KEY, "ai_reports",
+                   # The survey config on screen belongs to the survey being
+                   # left; the new one's saved settings are loaded instead.
+                   "survey_cfg", "_cfg_loaded_for"):
             S.pop(_k, None)
         S["_nav_token"] = S.get("_nav_token", 0) + 1
     S["_active_slug"] = _active_slug
@@ -946,6 +949,11 @@ with tabs[0]:
     st.caption(f"Everything on this page is filed under **{course or '(no course yet)'} "
                f"· Evaluation {eval_no}**. Change either one in the sidebar to work on a "
                f"different section or round.")
+    # Read once, used by the preview below and by the save and link sections
+    # further down. On a second visit this is the student list — the uploader is
+    # empty, because the file was uploaded the first time.
+    _saved_snap = survey.load_roster_snapshot(vault_now(), slug)
+    _is_saved = _saved_snap is not None
 
     # ---- Downloadable starter template --------------------------------------
     _tpl_path = os.path.join(_ASSET_DIR, "ContactList_Template.xlsx")
@@ -976,13 +984,23 @@ with tabs[0]:
         S["survey_contact_df"] = ingest.read_table(contact_file, contact_file.name)
     cdf = S.get("survey_contact_df")
 
-    if cdf is not None:
-        teams_preview = survey.build_teams(cdf)
+    # Either the list just uploaded, or — on a second visit, when the uploader is
+    # empty — the one already saved for this survey. Without the fallback the
+    # page looked unset up: no teams, no student count, nothing to send.
+    teams_preview = (survey.build_teams(cdf) if cdf is not None
+                     else dict((_saved_snap or {}).get("teams", {}) or {}))
+    if teams_preview:
         nstud = sum(len(v) for v in teams_preview.values())
-        st.success(f"{len(teams_preview)} team(s), {nstud} student(s) with teammates.")
+        if cdf is not None:
+            st.success(f"{len(teams_preview)} team(s), {nstud} student(s) with teammates.")
+        else:
+            st.success(f"Saved earlier: {len(teams_preview)} team(s), {nstud} "
+                       f"student(s). Nothing to upload again unless the list "
+                       f"itself has changed.")
         with st.expander("Teams preview"):
-            for t, members in teams_preview.items():
-                st.write(f"**Team {t}** — " + ", ".join(m["name"] for m in members))
+            for _tname, members in teams_preview.items():
+                st.write(f"**Team {_tname}** — "
+                         + ", ".join(m["name"] for m in members))
         no_email = [m["name"] for members in teams_preview.values()
                     for m in members if not m.get("email")]
         if no_email:
@@ -1038,6 +1056,16 @@ with tabs[0]:
             st.caption("Already loaded. Open **④ Results & reports** for the grades. "
                        "To load a different file, remove this one first.")
 
+    # On a second visit this page must show what was SAVED, not the factory
+    # defaults. Without this, a returning instructor saw default questions and an
+    # empty schedule — and "Save these settings" would then have written those
+    # defaults over their real ones. Loaded once per survey, so edits made
+    # during the session are never clobbered by a rerun.
+    if S.get("_cfg_loaded_for") != slug:
+        S["_cfg_loaded_for"] = slug
+        if _is_saved:
+            S["survey_cfg"] = survey.load_survey(vault_now(), slug)
+            S.pop("survey_cfg_dirty", None)
     cur = {**survey.DEFAULT_SURVEY, **(S.get("survey_cfg") or {})}
 
     with st.expander("Questions — turn each on or off"):
@@ -1256,15 +1284,37 @@ with tabs[0]:
     # Is this survey stored, and does it match what is on screen? Tabs ④ and ⑤
     # read the saved copy, and students open the saved copy, so "saved" is the
     # difference between settings that apply and settings that only look set.
-    _saved_snap = survey.load_roster_snapshot(vault_now(), slug)
-    _is_saved = _saved_snap is not None
     _shift = (survey.roster_shift(vault_now(), slug, cdf)
               if (cdf is not None and _is_saved) else
               {"teams": [], "responses": 0, "safe": True})
 
+    # Coming back to a survey that is already saved is the ordinary case, and the
+    # file uploader is empty then — the contact list was uploaded last week. The
+    # stored roster is the list, so the page works from it: the save button
+    # writes the questions, schedule and report settings and leaves the roster
+    # exactly as students' links expect, and the links themselves are rebuilt
+    # from that same stored list. Both used to be greyed out, which left no way
+    # to change a closing date or re-send a link on a second visit.
+    _saved_team_list = dict((_saved_snap or {}).get("teams", {}) or {})
+    _config_only = cdf is None and _is_saved
+    _not_safe_to_resave_note = ""
+    if cdf is not None and _is_saved and _shift["teams"]:
+        _not_safe_to_resave_note = (
+            "These links come from the student list already saved here, which is "
+            "what they open. The list you have uploaded differs — save it to make "
+            "it the live one.")
+
     if cdf is None and not _is_saved:
         st.info("Upload a contact list above, then save — that is what makes the "
                 "student links work.", icon="⬆️")
+    if _config_only:
+        _n_saved = sum(len(v) for v in _saved_team_list.values())
+        st.caption(
+            f"Working from the student list already saved here: "
+            f"{len(_saved_team_list)} team(s), {_n_saved} student(s). Saving "
+            f"updates the questions, the schedule and what students see — it "
+            f"leaves that list alone, so the links already sent keep working. "
+            f"Upload a contact list above only if the list itself has changed.")
     if not _shift["safe"]:
         st.error(
             f"**Saving now would attach answers to the wrong students.** "
@@ -1277,26 +1327,41 @@ with tabs[0]:
             f"roster, or put the list back the way it was.",
             icon="🛑",
         )
-    if st.button("💾 Save — and make the student links live", type="primary",
-                 disabled=(cdf is None or not _shift["safe"]),
-                 help="Writes the questions, the schedule, the report settings and "
-                      "the team list to your storage. Until you do this, the links "
-                      "do not open for students and tabs ④ and ⑤ use the last "
-                      "saved version."):
+    if st.button(("💾 Save these settings" if _config_only
+                  else "💾 Save — and make the student links live"),
+                 type="primary",
+                 disabled=((cdf is None and not _is_saved) or not _shift["safe"]),
+                 help=("Writes the questions, the schedule and the report settings. "
+                       "The saved student list is left as it is, so links already "
+                       "sent keep working." if _config_only else
+                       "Writes the questions, the schedule, the report settings and "
+                       "the team list to your storage. Until you do this, the links "
+                       "do not open for students and tabs ④ and ⑤ use the last "
+                       "saved version.")):
         if _own not in (None, "") and not survey.can_access(_own, user):
             st.error(f"Can't save — this course/eval belongs to `{_own}`.")
         else:
             try:
-                stamp = user["user"] if _own in (None, "") else None
-                sl, teams = survey.save_setup(course, eval_no, cdf, cur, owner=stamp)
-                nstud = sum(len(v) for v in teams.values())
-                st.success(f"Saved: {len(teams)} team(s), {nstud} student(s). The "
-                           f"student links are now live."
-                           + ("" if cfg.vault.backend != "local" else
-                              " ⚠️ Storage is set to 'local', which means this "
-                              "server's own disk — fine for trying things out, but "
-                              "it can be wiped at any time. Use your university "
-                              "storage before collecting real responses."))
+                if _config_only:
+                    sl, teams = survey.save_config(course, eval_no, cur,
+                                                   vault_now())
+                    nstud = sum(len(v) for v in teams.values())
+                    st.success(
+                        f"Saved. The questions, schedule and report settings are "
+                        f"updated for all {nstud} student(s); their links are "
+                        f"unchanged and still work.")
+                else:
+                    stamp = user["user"] if _own in (None, "") else None
+                    sl, teams = survey.save_setup(course, eval_no, cdf, cur,
+                                                  owner=stamp)
+                    nstud = sum(len(v) for v in teams.values())
+                    st.success(f"Saved: {len(teams)} team(s), {nstud} student(s). The "
+                               f"student links are now live."
+                               + ("" if cfg.vault.backend != "local" else
+                                  " ⚠️ Storage is set to 'local', which means this "
+                                  "server's own disk — fine for trying things out, but "
+                                  "it can be wiped at any time. Use your university "
+                                  "storage before collecting real responses."))
                 st.rerun()
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Could not save: {exc}")
@@ -1331,9 +1396,17 @@ with tabs[0]:
     if not _base_ok:
         st.warning("Paste this app's web address above. Without it the links have "
                    "no destination.", icon="🔗")
-    if cdf is not None and _is_saved and _base_ok:
-        links = survey.student_links(base_url, slug, survey.build_teams(cdf),
+    if _is_saved and _base_ok:
+        # Built from the SAVED team list, always — not from whatever happens to
+        # be in the uploader. A link token carries a team and a position in that
+        # stored list, so the stored list is what a link resolves against;
+        # building them from a fresh upload would hand a student someone else's
+        # form if the two had drifted. It is also why this works on a second
+        # visit, when the uploader is empty.
+        links = survey.student_links(base_url, slug, _saved_team_list,
                                      survey.token_secret(cfg))
+        if cdf is not None and _not_safe_to_resave_note:
+            st.caption(_not_safe_to_resave_note)
         with st.expander(f"Preview {len(links)} links"):
             st.dataframe(pd.DataFrame(links), **FULL_WIDTH, height=280)
         subj = st.text_input("Email subject",

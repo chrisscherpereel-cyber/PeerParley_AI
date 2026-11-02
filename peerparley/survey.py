@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -380,6 +380,38 @@ def save_setup(course: str, eval_no: str, contact_df: pd.DataFrame,
                {"course": course, "eval_no": eval_no, "teams": teams, "owner": snap_owner})
     _save_json(vault, key_survey(slug), survey_cfg)
     return slug, teams
+
+
+def save_config(course: str, eval_no: str, survey_cfg: Dict,
+                vault: Optional[Vault] = None) -> Tuple[str, Dict[str, List[dict]]]:
+    """Save the questions, schedule and report settings; keep the saved roster.
+
+    This is what a second visit needs. ``save_setup`` requires a contact list,
+    because it writes the roster snapshot — but the file uploader is empty when
+    an instructor comes back to a survey they set up last week, and that used to
+    leave the save button greyed out with no way to change a closing date.
+
+    Writing only the config is also the safer operation of the two: a student's
+    identity in a submission is their position in the stored roster, so the
+    roster is exactly the thing not to rewrite once answers exist. Here it is
+    not touched at all.
+    """
+    vault = vault or Vault()
+    slug = slugify(course, eval_no)
+    _save_json(vault, key_survey(slug), survey_cfg)
+    snap = load_roster_snapshot(vault, slug) or {}
+    return slug, dict(snap.get("teams", {}) or {})
+
+
+def saved_teams(vault: Vault, slug: str) -> Dict[str, List[dict]]:
+    """The team list students' links were built against, as stored.
+
+    Link tokens carry a team and a position *in this list*, so this — not a
+    freshly uploaded file — is what a link resolves against. Building links from
+    anything else risks handing a student someone else's form.
+    """
+    snap = load_roster_snapshot(vault, slug) or {}
+    return dict(snap.get("teams", {}) or {})
 
 
 def roster_shift(vault: Vault, slug: str, contact_df: pd.DataFrame) -> Dict[str, Any]:

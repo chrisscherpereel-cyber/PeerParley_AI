@@ -37,7 +37,8 @@ import sys
 import pytest
 from cryptography.fernet import Fernet
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 
 from peerparley import survey, pdfgen  # noqa: E402
 from peerparley.grading import GradeSettings, compute, data_warnings  # noqa: E402
@@ -365,3 +366,78 @@ def test_a_closed_survey_reports_closed(vault):
     cfg["opens_at"] = "2099-01-01T00:00:00"
     assert survey.window_state(cfg) == "not_yet"
     assert survey.window_state(dict(survey.DEFAULT_SURVEY)) == "open"
+
+
+# --------------------------------------------------------------------------- #
+# Coming back to a survey that is already set up
+# --------------------------------------------------------------------------- #
+# Reported from use: "when I open a second time the save — and make student
+# links live is grayed out and can't be regenerated even after a schedule
+# change, and the send personal links can't be regenerated and sent."
+#
+# Both sections were gated on the *uploaded* contact list, and the file uploader
+# is empty on a second visit — the list was uploaded last week. So an instructor
+# could not change a closing date, and could not re-send a link, without
+# re-uploading a file they should not have to touch.
+
+def test_settings_can_be_saved_without_re_uploading_the_contact_list(vault):
+    slug, teams, _ = set_up(vault)
+    before = survey.load_roster_snapshot(vault, slug)
+
+    cfg = dict(survey.DEFAULT_SURVEY)
+    cfg["closes_at"] = "2026-12-01T17:00:00"
+    cfg[survey.CLOCK_KEY] = -420
+    saved_slug, saved_teams = survey.save_config("QA101", "1", cfg, vault)
+
+    assert saved_slug == slug
+    # The schedule change took effect...
+    stored = survey.load_survey(vault, slug)
+    assert stored["closes_at"] == "2026-12-01T17:00:00"
+    assert stored[survey.CLOCK_KEY] == -420
+    # ...and the roster — which every student's link resolves against — did not
+    # move a millimetre.
+    assert survey.load_roster_snapshot(vault, slug) == before
+    assert saved_teams == before["teams"]
+
+
+def test_links_are_rebuilt_from_the_saved_list_not_from_an_upload(vault):
+    """The saved list is what a token resolves against, so it is what links are
+    built from — which is also why they survive an empty uploader."""
+    slug, teams, first_links = set_up(vault)
+    again = survey.student_links("https://peerparley.example", slug,
+                                 survey.saved_teams(vault, slug),
+                                 survey.token_secret())
+    assert [l["link"] for l in again] == [l["link"] for l in first_links]
+    assert len(again) == len(ROSTER)
+    # The token is what matters: the same student gets the same form however the
+    # link was rebuilt, and the base address can change freely.
+    moved = survey.student_links("https://new-address.example", slug,
+                                 survey.saved_teams(vault, slug),
+                                 survey.token_secret())
+    assert [l["link"].split("t=", 1)[1] for l in moved] == \
+        [l["link"].split("t=", 1)[1] for l in first_links]
+
+
+def test_saved_teams_is_empty_for_a_survey_that_was_never_saved(vault):
+    assert survey.saved_teams(vault, "nothing-here-eval9") == {}
+
+
+def test_the_second_visit_works_in_the_real_app(tmp_path):
+    """Drives the real page with the uploader empty — the reported bug.
+
+    In a subprocess: Streamlit's secrets are a process-wide singleton, so a
+    test earlier in the same run that loads a secrets file leaves its
+    encryption key behind and this one would seed a vault with one key and read
+    it with another. The driver is tests/_second_visit_app.py.
+    """
+    import subprocess
+    done = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", "_second_visit_app.py"),
+         str(tmp_path / "app")],
+        capture_output=True, text=True, timeout=600)
+    assert "FAILURES: none" in done.stdout, done.stdout[-3000:]
+    assert done.returncode == 0, done.stdout[-3000:]
+    # The two checks that are the bug itself, named here so a failure report
+    # says which one went.
+    assert "PASS - the save button is not greyed out" in done.stdout
+    assert "PASS - the student links were rebuilt" in done.stdout
