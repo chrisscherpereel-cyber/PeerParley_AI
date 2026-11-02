@@ -1,0 +1,37 @@
+# PeerParley — optional extras. Install only the ones you will use.
+#
+#   pip install -r requirements-optional.txt          # all of them
+#   pip install openai                                # or just one
+#
+# Nothing here is needed to run PeerParley. Each feature below checks for its
+# package at the moment you choose it and names the missing one instead of
+# failing with a traceback — so an install without these is a smaller app, not
+# a broken one.
+#
+# On Streamlit Community Cloud there is no second file: add the lines you need
+# to requirements.txt, since that is the only file the deploy installs.
+
+# ---- Storage backends other than Microsoft 365 ---------------------------- #
+# pCloud needs nothing extra (plain HTTPS). Dropbox needs its SDK.
+dropbox>=11.36,<13
+
+# ---- Convenience in the app ---------------------------------------------- #
+# Renders a PDF inside the app so you can look at a report without
+# downloading it. Without it, the download buttons still work.
+PyMuPDF>=1.24,<2
+# A formatting toolbar for the email body. Without it you get a plain text box
+# that accepts the same HTML.
+streamlit-quill>=0.0.3,<1
+
+# ---- The AI feedback writer ---------------------------------------------- #
+# Optional feature, off by default, and off again every time you sign in.
+# Install the SDK for the provider you intend to use — one is enough:
+#
+#   openai        OpenAI, xAI, OpenRouter, and a model running on your own
+#                 computer through Ollama or LM Studio (they all speak the
+#                 same /chat/completions contract)
+#   anthropic     Claude
+#   google-genai  Gemini
+openai>=1.40,<3
+anthropic>=0.34,<1
+google-genai>=0.3,<2

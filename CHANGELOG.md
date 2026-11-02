@@ -1,5 +1,161 @@
 # Changelog
 
+## 2.11.0 — sending, and whose clock it is
+
+Four changes to how an evaluation goes out, all of them defaults or wording
+that an instructor meets before they understand the app.
+
+### The default way to send is now the one that works for everybody
+
+Both "how do you want to send?" menus open on **Download auto-send scripts
+(Mac / Windows)**. It needs no app registration, no SMTP password and no
+decision about this app's mail settings: it drives the Outlook or Mail already
+signed in on the instructor's own computer, so the messages come from their own
+address. The two "send now" transports are still there, one place down.
+
+### Every send method offers a review step
+
+"Prepare them for me to look over first — don't send yet" is now on every
+method that can put mail in the world, ticked by default, and on the auto-send
+pack it is real rather than reassuring: the generated scripts call Outlook's
+`.Save()` instead of `.Send()` and `save` instead of `send` in both Mac mail
+apps, so every message lands in the Drafts folder and nothing leaves.
+
+The pack says so too — the launcher is named `Prepare drafts (Windows).cmd`,
+and the README in the zip describes drafts rather than sending. That matters
+because the instructor opens that folder days later, when the checkbox is long
+forgotten and the files are the only thing left saying what will happen. The
+two methods that cannot send anything (mailto, .eml files) now say that in
+place of the checkbox, so the same question has an answer everywhere.
+
+### This app's web address fills itself in
+
+The address that builds every student link is taken from the page the
+instructor is actually on, through the browser context. Until 2.9 the box
+carried a plausible default belonging to a different deployment; since then it
+has been empty and typed in by hand. Now it is right by default, and if the box
+is later changed to something else the app says plainly that students will be
+sent somewhere other than where you are.
+
+The query string is dropped on purpose: it carries this app's own state, and on
+a student's device it carries their personal token.
+
+### The scheduling clock is something you set
+
+Open and close times were compared against the *server's* clock, which on
+Streamlit Community Cloud is UTC. An instructor in Arizona setting "closes
+Friday 5pm" was setting 5pm UTC — 10am their time — so the survey shut
+mid-morning, and the panel disclosed this by printing the server clock rather
+than solving it.
+
+The schedule panel now asks what time it is where you are, and every open and
+close time, every status badge and every student-facing message is read against
+that clock. The browser's own offset is adopted the first time the panel is
+opened, so the usual case is a glance rather than arithmetic; it is stored with
+the survey, so the schedule means the same thing whoever opens the app. A
+survey saved before this release keeps behaving exactly as it did.
+
+### Also
+
+* `use_container_width=True`, whose removal date passed in December 2025, is
+  gone from every call. One shim asks the installed Streamlit which spelling it
+  takes, so the app works on both the versions `requirements.txt` allows and a
+  routine upgrade cannot turn a layout argument into a traceback. The app now
+  boots with no deprecation warnings at all.
+* The browser-context readers live in `peerparley/webcontext.py` as plain
+  functions over a context object, rather than inside `app.py` — a helper
+  buried in the Streamlit script cannot be tested, and the last defect of that
+  shape took a whole page down.
+
+17 new tests (229 total).
+
+## 2.10.0 — first public release
+
+Release validation, wearing a quality-control hat rather than a feature one:
+what does a *new* user meet, and does it work? Four things were release
+blockers, and all four were found by driving the app rather than by reading it.
+
+### A new installation had no way to start
+
+With no secrets configured — the state every new user is in — the app showed a
+red box quoting a shell one-liner and, measured with Streamlit's own test
+harness, **zero fields and zero buttons**. There was nothing to click. An
+instructor handed this app by a colleague was stopped on the first screen.
+
+There is now a setup screen: it takes an administrator password, generates the
+encryption key itself, and either writes `.streamlit/secrets.toml` or hands
+over the exact text to paste into Streamlit Cloud's Secrets box. No terminal,
+no `hashlib` one-liner. It also covers the second broken state — a password set
+but no encryption key — which used to let someone type in forty students and
+discover only at the first save that nothing could be stored.
+
+It appears **only** in those two states, refuses to overwrite an existing
+secrets file, and offers no file-write on a hosted server where the file would
+not survive a restart. A configured deployment never sees it; that is asserted
+in both test suites.
+
+### Nothing tested the path almost everyone takes
+
+The regression harness graded a synthetic *Qualtrics* export, and the unit
+tests covered the AI writer. The built-in survey — PeerParley's own reason for
+existing — had no automated test at all. Everything between "save the roster"
+and "a graded PDF" was checked by hand only.
+
+`tests/test_survey_end_to_end.py` now drives it for real, through a live
+encrypted vault in a temp folder: a signed link per student, tokens that resolve
+to the right person and fail when tampered with, a submission validated by the
+same gate the form uses, responses that are ciphertext on disk (asserted by
+searching the files for the students' own words), grading, the self-evaluation
+pull, the report, the confidential note reaching the instructor and no student,
+and a section where only one student answered.
+
+### A first install could break later through no fault of its own
+
+Every dependency was `>=` with no ceiling, so a major release of pandas or
+Streamlit lands in a *fresh* install months from now and breaks it for someone
+who changed nothing. All core requirements now have both bounds, and a test
+fails if one loses its ceiling.
+
+The one file also mixed what the app needs with what it does not: a new user
+installed three AI SDKs and the Dropbox client to run a peer evaluation. It is
+now `requirements.txt` (the app), `requirements-optional.txt` (AI writer,
+Dropbox, PDF previews, the rich email editor) and `requirements-dev.txt`
+(pytest). Validated on a clean virtual environment with only the core file
+installed: every module imports, the app boots, and a feature whose package is
+missing names that package instead of raising.
+
+### A deprecated call already past its removal date
+
+`st.components.v1.html` is deprecated with a removal date that has passed, and
+the app called it on every page load. Found by booting against two Streamlit
+versions. It is now `st.iframe` where available — which rejects the `height=0`
+the old call accepted, so the two could not simply be swapped — with the old
+call as the fallback and both wrapped, because the only thing at stake is
+whether the page scrolls itself.
+
+### Also in this release
+
+* **`selfcheck.py`** — "is this installation usable?" in one command. Python
+  version, packages (required and optional, with what each is for),
+  configuration, an encryption round trip, a real write-read-delete against
+  storage, email and AI readiness, then a plain verdict and an exit code. It
+  changes nothing, and it never prints an API key.
+* **`RELEASE.md`** — what was validated, the commands that prove it, and the
+  limits stated rather than hidden.
+* Python 3.10 is now declared and enforced at import with a readable message.
+  Several dataclasses use `X | None` annotations that are evaluated at class
+  creation, so 3.9 failed with "unsupported operand type(s) for |" — which
+  tells a new user nothing.
+* `VAULT_FOLDER` is honoured as an environment variable. The backend already
+  was, so configuration this module documents as working only half worked.
+* The licence names a person rather than a GitHub handle, and two
+  how-to-push-this-to-GitHub notes left over from development no longer ship.
+* README and DEPLOYMENT lead with an install that is three commands and a
+  setup screen; the manual secret-generation route is kept for the hosted
+  deployment, where it is still useful.
+
+26 new tests (212 total) and 3 new regression checks (93 total).
+
 ## 2.9.0 — the whole-application audit
 
 A review of all 13,000 lines, prompted by one request ("have AI off by default,

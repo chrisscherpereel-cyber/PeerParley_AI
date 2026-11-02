@@ -533,6 +533,31 @@ _frame_cached = results_to_frame(compute(long_df, GradeSettings()))
 check("caching grades did not change them",
       _frame_cached.equals(results_to_frame(compute(long_df, GradeSettings()))))
 
+# --------------------------------------------------------------------------- #
+# Release: the state a brand-new installation starts in
+# --------------------------------------------------------------------------- #
+import os  # noqa: E402
+from cryptography.fernet import Fernet as _Fernet  # noqa: E402
+from peerparley import setup_wizard as _sw  # noqa: E402
+
+# Asserted on what the app actually rendered. (Calling setup_wizard.needed()
+# from this process would answer about *this* process, which has no Streamlit
+# secrets — the app under test has its own.)
+_page = " ".join(str(getattr(e, "value", "")) for e in at.markdown)
+check("a configured deployment goes straight to sign-in, not to setup",
+      "needs two things before you start" not in _page)
+
+# And the gate's own logic, with the configuration supplied as environment
+# variables, which load_config() reads when Streamlit secrets are absent.
+os.environ["FERNET_KEY"] = _Fernet.generate_key().decode()
+os.environ["APP_PASSWORD_SHA256"] = "0" * 64
+check("the setup screen stands aside once a key and a password exist",
+      _sw.key_is_usable() and _sw.has_credential() and not _sw.needed())
+del os.environ["FERNET_KEY"]
+check("and it appears again when the encryption key goes missing",
+      _sw.needed() and not _sw.key_is_usable())
+os.environ.pop("APP_PASSWORD_SHA256", None)
+
 print("\n== SUMMARY ==")
 passed = sum(1 for _, ok in results if ok)
 print(f"{passed}/{len(results)} checks passed")

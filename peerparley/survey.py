@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -81,6 +81,13 @@ DEFAULT_SURVEY: Dict = {
     "ranking_categories": list(RANK_CATEGORIES),
 
     # ---- Pay allocation ----
+    # Minutes the instructor's clock runs ahead of the server's. None means
+    # nobody has decided yet, so the app can adopt the browser's own offset the
+    # first time the schedule panel is opened; an explicit 0 means "use the
+    # server's clock", which is what every survey saved before 2.11 did and what
+    # a missing key still means.
+    "clock_offset_minutes": None,
+
     "ask_allocation": True,
     # The $100 is shared among TEAMMATES, not the whole team including yourself.
     # That is what the grader assumes (an even share is 100/(n-1)), and money
@@ -138,15 +145,71 @@ def parse_dt(value):
         return None
 
 
+# How far the instructor's clock is ahead of the server's, in minutes. Stored
+# with the survey, so a schedule means the same thing whoever opens the app and
+# wherever the app happens to be running.
+#
+# Why this exists: open and close times were compared against the *server's*
+# clock, which on Streamlit Community Cloud is UTC. An instructor in Arizona
+# typing "closes Friday 5pm" was setting 5pm UTC — 10am their time, so the
+# survey shut at mid-morning on Friday with nothing on screen having said so.
+# The panel printed the server clock, which disclosed the problem without
+# solving it.
+CLOCK_KEY = "clock_offset_minutes"
+
+
+def clock_offset(survey_cfg: Optional[Dict] = None) -> int:
+    """Minutes to add to the server clock to get the instructor's wall clock."""
+    try:
+        return int((survey_cfg or {}).get(CLOCK_KEY, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def local_now(survey_cfg: Optional[Dict] = None) -> datetime:
+    """Now, on the clock the instructor set. Every schedule is read against it."""
+    return datetime.now() + timedelta(minutes=clock_offset(survey_cfg))
+
+
+def offset_from_wall_clock(stated: datetime,
+                           server_now: Optional[datetime] = None,
+                           round_to: int = 5) -> int:
+    """The offset implied by "it is <stated> where I am", in minutes.
+
+    Rounded to five minutes because the instructor is typing a wall-clock time,
+    not timing a stopwatch: the difference between a stated 5:00 and a server
+    4:58:37 is their typing speed, not a real 1m23s offset. Every real zone
+    offset is a multiple of fifteen minutes, so five is finer than it needs to
+    be and still absorbs the noise.
+    """
+    server_now = server_now or datetime.now()
+    delta = (stated - server_now).total_seconds() / 60.0
+    step = max(1, int(round_to))
+    return int(round(delta / step)) * step
+
+
+def describe_clock(survey_cfg: Optional[Dict] = None) -> str:
+    """One line for the instructor: what time this survey thinks it is."""
+    offset = clock_offset(survey_cfg)
+    now = local_now(survey_cfg)
+    if offset == 0:
+        return f"Scheduling clock: **{now:%b %d, %Y %I:%M %p}** (this server's own time)."
+    hours = offset / 60.0
+    sign = "ahead of" if offset > 0 else "behind"
+    return (f"Scheduling clock: **{now:%b %d, %Y %I:%M %p}** — "
+            f"{abs(hours):g} hour(s) {sign} this server's clock.")
+
+
 def window_state(survey_cfg: Dict):
     """Return one of 'open', 'not_yet', 'closed', 'disabled' for the survey now.
 
-    Times are compared against the app server's clock (datetime.now()). The
-    master `is_open` switch, when off, closes the survey regardless of dates.
+    Times are compared against the clock the instructor set (the server's own
+    clock when they have not set one). The master `is_open` switch, when off,
+    closes the survey regardless of dates.
     """
     if not survey_cfg.get("is_open", True):
         return "disabled"
-    now = datetime.now()
+    now = local_now(survey_cfg)
     opens = parse_dt(survey_cfg.get("opens_at"))
     closes = parse_dt(survey_cfg.get("closes_at"))
     if opens and now < opens:

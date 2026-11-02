@@ -595,7 +595,8 @@ grading changes either way.
 | `peerparley/workspace.py` | Session autosave and the complete `.ppx` bundle format |
 | `peerparley/model_advisor.py` | Model suitability verdicts, recommendations, track record |
 | `peerparley/safety.py` | Local screen for abusive language in comments and summaries |
-| `tests/test_feedback_ai.py` | 185 offline tests; no API key needed |
+| `tests/test_feedback_ai.py` | the AI writer, offline; no API key needed |
+| `tests/test_survey_end_to_end.py` | the survey path the AI writer sits inside |
 
 The provider layer is ported from **TransQ**, a lecture-quiz builder that solved
 the same problem — one instructor-facing Streamlit app that has to talk to

@@ -10,6 +10,29 @@ for email (and, optionally, M365 storage).
 
 ---
 
+## 0. Just trying it out? Start here instead
+
+Nothing below is needed to see PeerParley work end to end on your own computer:
+
+```bash
+python3 -m pip install -r requirements.txt     # Python 3.10 or newer
+python3 -m streamlit run app.py
+```
+
+The app's first screen asks for an administrator password, generates the
+encryption key, and offers to write `.streamlit/secrets.toml` for you. Restart,
+sign in as **admin**, and you can run a complete evaluation — survey, links,
+responses, grades, PDFs — with storage set to `local`.
+
+`python3 selfcheck.py` answers "is this installation usable?" at any point, and
+names what is missing if not.
+
+Two things that `local` storage is *not* suitable for: a hosted deployment
+(those files vanish at a restart) and real student records (they belong in
+university-controlled storage). That is what the rest of this document sets up.
+
+---
+
 ## 1. GitHub + Streamlit Cloud (the public tier)
 
 1. Create a **private** GitHub repo and push this folder.
@@ -24,7 +47,9 @@ for email (and, optionally, M365 storage).
    (`app_password_sha256`). Optionally use Streamlit Cloud's viewer allow-list
    to limit to `@nau.edu` accounts.
 
-Generate the two required secrets:
+Generate the two required secrets. **The easy way:** run the app anywhere
+(including locally), and its first screen will generate both and give you a
+block of text to paste straight into Streamlit's Secrets box. By hand:
 
 ```bash
 # app password hash (paste the plaintext when prompted)
@@ -184,7 +209,7 @@ Full guide, including what gets sent and how the grounding checks work:
 ## Before the first live section
 
 ```bash
-python3 -m pytest tests/ -q     # 185 offline tests
+python3 -m pytest tests/ -q     # 229 offline tests
 python3 qa_regression.py        # 80 end-to-end checks
 ```
 

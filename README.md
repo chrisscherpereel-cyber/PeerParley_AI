@@ -92,43 +92,74 @@ under university identity, DLP, and retention governance. See `ARCHITECTURE.md`.
 
 ## Quick start (local)
 
+**You need Python 3.10 or newer.** Check with `python3 --version`.
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-
-# create secrets
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-# generate an app password hash:
-python3 -c "import hashlib,getpass;print(hashlib.sha256(getpass.getpass().encode()).hexdigest())"
-# generate an encryption key:
-python3 -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
-# paste both into secrets.toml, choose a vault backend, fill its credentials
-
 python3 -m streamlit run app.py
 ```
+
+That is the whole installation. The app opens on a **setup page**: choose an
+administrator password, and PeerParley generates the encryption key that
+protects every student record it stores. It will write
+`.streamlit/secrets.toml` for you, or hand you the text to paste if you would
+rather do it yourself. Restart the app, sign in as **admin**, and the first tab
+tells you what to do next.
+
+Keep a copy of that encryption key somewhere safe — a password manager. It is
+not recoverable, and without it everything already saved is unreadable.
+
+```bash
+python3 selfcheck.py     # "is this installation usable?" — run it any time
+```
+
+`selfcheck.py` reports on Python, packages, your settings, storage, encryption,
+email and the AI writer, and finishes with a plain verdict. It changes nothing.
+Run it first whenever something looks wrong.
 
 > On macOS, if `pip` and `streamlit` disagree about the interpreter, always use
 > `python3 -m pip …` and `python3 -m streamlit run …`.
 
-### Optional: the AI feedback writer
+### Where your data lives
+
+Out of the box, storage is **local**: encrypted files under `vault_cache/`
+beside the app. That is fine for trying PeerParley out, but on a hosted server
+those files can be wiped at any restart — so before collecting real responses,
+point it at your university's storage (Microsoft 365, Dropbox or pCloud). One
+setting, covered in **`DEPLOYMENT.md`**.
+
+### Optional extras
 
 ```bash
-# install only the provider you'll use
-python3 -m pip install openai        # OpenAI / xAI / OpenRouter / local Ollama
-python3 -m pip install anthropic     # Claude
-python3 -m pip install google-genai  # Gemini
+python3 -m pip install -r requirements-optional.txt   # all of them
 ```
 
-Add the matching key to `secrets.toml` (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`GEMINI_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`) or paste one into the
-sidebar, then switch it on there. Full guide: **`docs/AI_FEEDBACK.md`**.
+Nothing here is required. The list covers Dropbox storage, in-app PDF previews,
+a formatting toolbar for emails, and the AI feedback writer's provider SDKs —
+install one of `openai` (OpenAI / xAI / OpenRouter / a model on your own
+computer), `anthropic` (Claude) or `google-genai` (Gemini). Choosing a feature
+whose package is missing produces a message naming the package, not a crash.
 
-### Tests
+For the AI writer, add the matching key to `secrets.toml`
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`,
+`OPENROUTER_API_KEY`) or paste one into the sidebar for a single session, then
+switch it on there. It is off every time you sign in, by design. Full guide:
+**`docs/AI_FEEDBACK.md`**.
+
+### Checks
 
 ```bash
-python3 -m pytest tests/ -q     # 185 unit tests, fully offline
-python3 qa_regression.py        # 80 end-to-end checks via Streamlit AppTest
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest tests/ -q     # 229 tests, fully offline
+python3 qa_regression.py        # 93 checks driving the real app, headless
+python3 selfcheck.py            # is this installation usable?
 ```
+
+Nothing in there touches the network, emails anybody, or spends an AI request:
+the tests run against fakes and synthetic sections. The end-to-end tests drive
+the real survey — signed link, student form, encrypted response, grading, PDF —
+so a broken install fails loudly rather than in week three of your course.
 
 ## Deploy to Streamlit Cloud
 See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
@@ -141,7 +172,10 @@ See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
 
 ```
 ├── app.py                     # single Streamlit application (entry point)
-├── requirements.txt
+├── requirements.txt           # what the app needs
+├── requirements-optional.txt  # extras: AI writer, Dropbox, previews
+├── requirements-dev.txt       # pytest, for running the checks
+├── selfcheck.py               # "is this installation usable?"
 ├── .gitignore                 # blocks secrets + all student data
 ├── .streamlit/
 │   ├── config.toml
@@ -178,14 +212,16 @@ See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
 │   ├── model_advisor.py       # v2: model verdicts, recommendations, track record
 │   ├── safety.py              # v2: abusive-language screen for comments + summaries
 │   └── ai_ui.py               # v2: sidebar settings, model pickers, review panel
+│   └── setup_wizard.py        # first-run setup: password + encryption key
 ├── tests/
-│   └── test_feedback_ai.py    # 185 offline tests; no API key needed
+│   ├── test_feedback_ai.py    # the AI writer, offline; no API key needed
+│   ├── test_survey_end_to_end.py  # link → form → response → grade → PDF
+│   └── test_first_run.py      # a brand-new installation
 ├── qa_regression.py           # headless AppTest harness (90 checks)
 ├── docs/
 │   └── AI_FEEDBACK.md         # the AI writer: rules, setup, cost, audit trail
 ├── GRADING.md
 ├── SURVEY_FEATURE.md
-├── UPLOAD_TO_GITHUB.md
 ├── DEPLOYMENT.md
 └── ARCHITECTURE.md
 ```

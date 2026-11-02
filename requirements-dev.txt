@@ -1,0 +1,15 @@
+# PeerParley — what you need to run the checks, on top of requirements.txt.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   python3 -m pytest tests/ -q        # unit + end-to-end tests, all offline
+#   python3 qa_regression.py           # drives the real app, headless
+#   python3 selfcheck.py               # is this installation usable?
+#
+# None of these touch the network, send email, or make an AI request: the tests
+# run against fakes, and the regression harness drives the app through
+# Streamlit's own test runner with synthetic student data.
+
+pytest>=8.0,<10
+
+# The regression harness also uses PyMuPDF (from requirements-optional.txt) in
+# the paths that render a PDF preview; it is skipped if absent.

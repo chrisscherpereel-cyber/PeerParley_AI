@@ -123,16 +123,31 @@ personal link and either email it or download **links.csv** for your own mail
 merge.
 
 **Open / close dates.** The survey config carries optional `opens_at` /
-`closes_at` datetimes (app-server clock). Before the open date the student form
-says "opens on…"; after the close date it says "closed"; submissions are blocked
-outside the window (re-checked on submit, so a deadline that passes mid-session
-still holds). The master switch closes it instantly regardless of dates.
+`closes_at` datetimes, read against the **scheduling clock** you set in the same
+panel (`clock_offset_minutes`, stored with the survey). That clock starts from
+your browser's own time zone, so "closes Friday 5pm" means 5pm where you are —
+not 5pm wherever the app happens to be running, which on Streamlit Cloud is UTC.
+Surveys saved before 2.11.0 have no offset stored and keep using the server's
+clock. Before the open date the student form says "opens on…"; after the close
+date it says "closed"; submissions are blocked outside the window (re-checked on
+submit, so a deadline that passes mid-session still holds). The master switch
+closes it instantly regardless of dates.
 
-**Email is not tied to Microsoft 365.** Every send point (invitations,
-reminders, and the results Email tab) has a **Send via** picker — *Microsoft 365
-(Graph)* or *SMTP server* (Gmail/NAU/etc., credentials from `[email]` secrets) —
-plus a no-server path: download `links.csv` for invites, or the PDF bundle for
-results, and send them yourself.
+**Email is not tied to Microsoft 365, and nothing sends by accident.** Every
+send point (invitations, reminders, and the results Email tab) offers the same
+menu, which opens on **Download auto-send scripts** — a zip that drives the
+Outlook or Mail already signed in on your own computer, so no app registration
+or SMTP password is needed and the mail comes from your address. *Microsoft 365
+(Graph)* and *SMTP server* (credentials from `[email]` secrets) are there for
+sending from the app itself, along with .eml files, mailto links and a CSV for
+your own mail merge.
+
+Every method that can send offers **"prepare them for me to look over first"**,
+ticked by default. It is not cosmetic: Graph writes Outlook drafts, SMTP hands
+back a zip of ready-to-send files, and the auto-send scripts call Outlook's
+`.Save()` and the Mac apps' `save` instead of sending — so each message waits in
+your Drafts folder. The zip is named for what it does (`Prepare drafts
+(Windows).cmd`), because that folder is what you open days later.
 
 **2 · Responses** — response counts overall and per team, a non-responder list
 you can download or email a reminder to, and **Load responses into grading**,

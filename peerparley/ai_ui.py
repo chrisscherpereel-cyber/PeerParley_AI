@@ -18,6 +18,8 @@ from typing import Dict, List, Optional
 
 import streamlit as st
 
+from .ui_helpers import FULL_WIDTH
+
 from . import feedback_ai as fai
 from . import safety
 from .aiconfig import (
@@ -144,7 +146,7 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
                 for w in a.warnings:
                     st.caption(f"　! {w}")
                 if st.button(f"Use {a.model}", key=f"ai_use_{bucket}",
-                             use_container_width=True):
+                             **FULL_WIDTH):
                     st.session_state["ai_or_model"] = a.model
                     st.rerun()
 
@@ -210,7 +212,7 @@ def _openrouter_model_picker(default_slug: str, *, reply_tokens: int = 4000,
             st.caption(f"　! {w}")
 
     c1, c2 = st.columns(2)
-    if c1.button("↻ Refresh list", use_container_width=True, key="ai_or_refresh"):
+    if c1.button("↻ Refresh list", **FULL_WIDTH, key="ai_or_refresh"):
         _openrouter_catalog.clear()
         _key_status.clear()
         st.rerun()
@@ -294,7 +296,7 @@ def _local_model_picker(current_url: str, saved_model: str) -> tuple:
     base_url = localmodels.normalise(base_url)
 
     left, right = st.columns([1, 1])
-    if left.button("Check again", use_container_width=True, key="ai_local_recheck"):
+    if left.button("Check again", **FULL_WIDTH, key="ai_local_recheck"):
         _probe_local.clear()
         st.rerun()
     mem = localmodels.available_memory_gb()
@@ -517,7 +519,7 @@ def sidebar_settings(vault=None, username: str = "") -> AISettings:
     # ---- remember these choices -----------------------------------------
     if vault is not None:
         if st.button("💾 Remember these settings", key="ai_save_prefs",
-                     use_container_width=True,
+                     **FULL_WIDTH,
                      help="Saves the provider, model, tone and grounding "
                           "options to your account. Your API key is never "
                           "saved — it stays in this session only."):
@@ -631,7 +633,7 @@ def _points_table(draft: fai.Draft) -> None:
                 "Citation": "✅" if p.quote_ok else f"❌ {p.quote_match:.0%}",
             })
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, **FULL_WIDTH, hide_index=True)
     else:
         st.caption("The model recorded no sourced points for this draft.")
 
@@ -1173,7 +1175,7 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
                     st.caption("Numbers only for this student.")
             with dl2:
                 if st.button("↻ Rewrite from scratch", key=f"ai_regen_{m.key}",
-                             use_container_width=True,
+                             **FULL_WIDTH,
                              help="Drafts this student again and throws away "
                                   "what is there now, including your edits and "
                                   "the approval. Costs one or two AI requests."):

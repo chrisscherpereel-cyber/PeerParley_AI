@@ -1,30 +1,34 @@
-streamlit>=1.36
-pandas>=2.2
-numpy>=1.26
-openpyxl>=3.1
-reportlab>=4.1
-cryptography>=42.0
-requests>=2.32
-msal>=1.28
-# Retry/backoff for LLM calls (rate limits, 5xx, timeouts)
-tenacity>=8.2
-# Optional storage backends (install only what you use)
-dropbox>=11.36
-# PDF preview (optional; app degrades gracefully if absent)
-PyMuPDF>=1.24
-# WYSIWYG email editor (app falls back to a plain HTML box if absent)
-streamlit-quill>=0.0.3
+# PeerParley — what the app needs to run.
 #
-# ---- AI feedback writer (v2) ----------------------------------------------
-# All optional. The app imports and runs without any of them; each provider's
-# SDK is imported lazily, and choosing a provider whose SDK is missing produces
-# a message naming the package rather than a traceback. Install only the one(s)
-# you will use.
+#   pip install -r requirements.txt
 #
-# openai      — OpenAI, xAI, OpenRouter, and local Ollama / LM Studio
-#               (they all speak the same /chat/completions contract)
-# anthropic   — Claude
-# google-genai — Gemini
-openai>=1.40
-anthropic>=0.34
-google-genai>=0.3
+# Streamlit Community Cloud installs this file automatically on deploy.
+# Needs Python 3.10 or newer.
+#
+# Every entry has a lower bound (the oldest version this code is written
+# against) and an upper bound at the next major version. The upper bounds are
+# the point: without them, a major release of pandas or Streamlit lands in a
+# *fresh* install months from now and breaks it for a new user who changed
+# nothing. Raise them deliberately, after running the tests.
+#
+# Optional extras — the AI writer, Dropbox or pCloud storage, in-app PDF
+# previews, the rich email editor — live in requirements-optional.txt. The app
+# runs without any of them and says which package is missing if you pick a
+# feature that needs one.
+
+streamlit>=1.36,<2
+pandas>=2.2,<4
+numpy>=1.26,<3
+openpyxl>=3.1,<4            # Excel contact lists
+reportlab>=4.1,<6           # the PDF reports
+cryptography>=42.0,<60      # encrypts every stored student record
+requests>=2.32,<3           # talking to your storage provider
+
+# Microsoft 365 / OneDrive / SharePoint storage and email. Kept here rather
+# than in the optional file because it is the storage DEPLOYMENT.md recommends
+# for student records, and the default email mode.
+msal>=1.28,<2
+
+# Backs off and retries an AI request that was rate-limited or timed out.
+# Small, pure Python; without it a single rate limit becomes a failed draft.
+tenacity>=8.2,<10

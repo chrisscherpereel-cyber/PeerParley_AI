@@ -69,7 +69,11 @@ def load_config() -> AppConfig:
     s = _secrets()
     vault_node = s.get("vault", {}) or {}
     backend = vault_node.get("backend", os.environ.get("VAULT_BACKEND", "local"))
-    folder = vault_node.get("folder", "PeerParley")
+    # The folder had no environment fallback while the backend did, so a
+    # configuration this module documents as working ("secrets, otherwise
+    # environment variables") only half worked — and two local installs, or a
+    # test run, could not be pointed at separate folders without a secrets file.
+    folder = vault_node.get("folder", os.environ.get("VAULT_FOLDER", "PeerParley"))
     options = vault_node.get(backend, {}) or {}
 
     m365 = (s.get("vault", {}) or {}).get("m365", {}) or {}

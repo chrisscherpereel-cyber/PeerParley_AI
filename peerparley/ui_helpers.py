@@ -13,6 +13,25 @@ from .grading import StudentResult, TeamResult
 from .ingest import Roster
 
 
+# Streamlit renamed `use_container_width=True` to `width="stretch"` and set a
+# removal date for the old spelling that has now passed, while the versions
+# requirements.txt still allows only understand the old one. So the spelling is
+# decided once, here, by asking the installed Streamlit which argument it takes
+# — rather than shipping a call that a routine upgrade turns into a traceback,
+# or dropping support for the older versions.
+def _detect_width_kwargs() -> dict:
+    try:
+        import inspect
+        if "width" in inspect.signature(st.button).parameters:
+            return {"width": "stretch"}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"use_container_width": True}
+
+
+FULL_WIDTH = _detect_width_kwargs()
+
+
 def render_pdf(pdf_bytes: bytes) -> None:
     """Inline PDF preview. Tries PyMuPDF page images (iframes are blocked by
     browsers); falls back to a download button."""
@@ -21,7 +40,7 @@ def render_pdf(pdf_bytes: bytes) -> None:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         for page in doc:
             pix = page.get_pixmap(dpi=120)
-            st.image(pix.tobytes("png"), use_container_width=True)
+            st.image(pix.tobytes("png"), **FULL_WIDTH)
         return
     except Exception:
         pass

@@ -39,6 +39,8 @@ from peerparley import ingest
 from peerparley import survey
 from peerparley import emailpack
 from peerparley import ai_ui
+from peerparley import setup_wizard
+from peerparley import webcontext
 from peerparley import workspace
 from peerparley.grading import (
     GradeSettings,
@@ -50,6 +52,7 @@ from peerparley import pdfgen
 from peerparley import email_delivery as mail
 from peerparley.vault import Vault
 from peerparley.ui_helpers import (
+    FULL_WIDTH,
     render_pdf as _render_pdf,
     student_ctx as _ctx,
     build_messages as _build_messages,
@@ -104,6 +107,14 @@ except Exception:
     _token = (_qp.get("t") or [None])[0]
 if _token:
     survey.render_student_app(_token)
+    st.stop()
+
+# A brand-new deployment cannot be signed into or store anything, and used to
+# say so with a shell one-liner and no buttons on the page. The setup screen
+# stands in front of the sign-in form in exactly those two states, and nowhere
+# else — see peerparley/setup_wizard.py for why that is safe.
+if setup_wizard.needed():
+    setup_wizard.render()
     st.stop()
 
 if not require_login():
@@ -190,6 +201,22 @@ def _response_status(slug: str) -> list:
     this, so "has anyone answered in the last minute?" is still one click away.
     """
     return survey.response_status(vault_now(), slug)
+
+
+def _this_app_url() -> str:
+    """Where this page is open, for the student links. See peerparley.webcontext."""
+    try:
+        return webcontext.app_url(getattr(st, "context", None))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _browser_clock_offset():
+    """Minutes the viewer's clock is ahead of the server's, or None."""
+    try:
+        return webcontext.clock_offset_minutes(getattr(st, "context", None))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _report_settings(course: str, eval_no: str) -> dict:
@@ -295,7 +322,7 @@ with st.sidebar:
         st.info("**Earlier session found**\n\n" + workspace.describe(_saved),
                 icon="💾")
         r1, r2 = st.columns([1.4, 1])
-        if r1.button("↩ Resume it", type="primary", use_container_width=True,
+        if r1.button("↩ Resume it", type="primary", **FULL_WIDTH,
                      key="ws_resume"):
             S["long_df"] = _saved["long_df"]
             S["self_evals"] = _saved["self_evals"]
@@ -321,7 +348,7 @@ with st.sidebar:
                 _saved["course"], _saved["eval_no"] or "1")
             S["_ws_resumed"] = True
             st.rerun()
-        if r2.button("Discard", use_container_width=True, key="ws_discard",
+        if r2.button("Discard", **FULL_WIDTH, key="ws_discard",
                      help="Deletes the saved session permanently."):
             S["ws_confirm_discard"] = True
         if S.get("ws_confirm_discard"):
@@ -525,12 +552,28 @@ def _mail_app_links(recipients, subject_t, body_t, course, eval_no, limit=80):
         st.info("No recipients with an email address.")
 
 
-_LINK_METHODS = ["Microsoft 365 — send now", "SMTP — send now",
+# Auto-send first, because it is the method that works for everybody: it needs
+# no app registration, no SMTP password and no decision about this app's mail
+# settings — it uses the Outlook or Mail already signed in on the instructor's
+# own computer, and the messages then come from their own address.
+_LINK_METHODS = ["Download auto-send scripts (Mac / Windows)",
+                 "Microsoft 365 — send now", "SMTP — send now",
                  "Open in my mail app (mailto)", "Download .eml files",
-                 "Download auto-send scripts (Mac / Windows)", "Download links CSV"]
-_RESULT_METHODS = ["Microsoft 365 — send now", "SMTP — send now",
-                   "Download .eml files", "Download auto-send scripts (Mac / Windows)",
-                   "Download recipients CSV"]
+                 "Download links CSV"]
+_RESULT_METHODS = ["Download auto-send scripts (Mac / Windows)",
+                   "Microsoft 365 — send now", "SMTP — send now",
+                   "Download .eml files", "Download recipients CSV"]
+
+# Ticked by default, on every method. "Prepare" means different machinery in
+# each case — Outlook drafts, a .eml pack, scripts that save instead of send —
+# but the promise is the same one everywhere: nothing has gone out yet.
+REVIEW_LABEL = "Prepare them for me to look over first — don't send yet"
+
+
+def _review_first(key: str, how: str) -> bool:
+    """The review checkbox, with the explanation that fits this method."""
+    return st.checkbox(
+        REVIEW_LABEL, value=True, key=f"{key}_d", help=how)
 
 
 def _api_and_drafts(method_label, key):
@@ -543,13 +586,12 @@ def _api_and_drafts(method_label, key):
     yet"), different mechanism.
     """
     api = "graph" if method_label.startswith("Microsoft") else "smtp"
-    drafts = st.checkbox(
-        "Prepare them for me to look over first — don't send yet",
-        value=True, key=f"{key}_d",
-        help=("Creates them as drafts in your Outlook, ready to send."
-              if api == "graph" else
-              "Builds a zip of ready-to-send email files you can open and check "
-              "before sending, because SMTP has no drafts folder."))
+    drafts = _review_first(
+        key,
+        "Creates them as drafts in your Outlook, ready for you to send."
+        if api == "graph" else
+        "Builds a zip of ready-to-send email files you can open and check "
+        "first, because SMTP has no drafts folder of its own.")
     return api, drafts
 
 
@@ -584,24 +626,44 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
                         body=mail.render_template(body, ctx), attachments=[]))
                 _deliver(msgs, api, drafts, ok_label=f"{label} delivered")
     elif m.startswith("Open in my mail app"):
+        st.caption("✓ Nothing is sent by this method: each link opens a message "
+                   "in your own mail app for you to read and send.")
         _mail_app_links(recipients, subj, body, course, eval_no)
     elif m.startswith("Download .eml"):
-        if st.button("Build .eml files", key=f"{key}_eml"):
+        st.caption("✓ Nothing is sent by this method: you get a file per student "
+                   "to open, read and send from your own mail app.")
+        if st.button("Build the email files", key=f"{key}_eml", type="primary"):
             st.session_state[f"{key}_emlzip"] = emailpack.zip_folders(
                 {label: emailpack.invite_items(recipients, subj, body, course, eval_no)})
         if st.session_state.get(f"{key}_emlzip"):
             st.download_button("⬇ Download .eml zip", st.session_state[f"{key}_emlzip"],
                                f"{label.lower()}_eml.zip", "application/zip")
     elif m.startswith("Download auto-send"):
-        if st.button("Build auto-send scripts", key=f"{key}_auto"):
+        drafts = _review_first(
+            key,
+            "The scripts put every message in your Drafts folder instead of "
+            "sending it, so you can read them in Outlook or Mail and send them "
+            "yourself.")
+        if st.button("Build the scripts", key=f"{key}_auto", type="primary"):
             st.session_state[f"{key}_autozip"] = emailpack.send_all_pack(
-                emailpack.invite_parts(recipients, subj, body, course, eval_no), label)
+                emailpack.invite_parts(recipients, subj, body, course, eval_no),
+                label, drafts=drafts)
+            st.session_state[f"{key}_autodrafts"] = drafts
         if st.session_state.get(f"{key}_autozip"):
-            st.download_button("⬇ Download auto-send zip", st.session_state[f"{key}_autozip"],
-                               f"{label.lower()}_autosend.zip", "application/zip")
-            st.caption("Unzip, then just **double-click** — `Send emails (Windows).cmd` on "
-                       "Windows, or `send_all_mac.applescript` on Mac. Sends from your own "
-                       "Outlook / Apple Mail.")
+            _was_drafts = st.session_state.get(f"{key}_autodrafts", True)
+            st.download_button(
+                "⬇ Download the zip", st.session_state[f"{key}_autozip"],
+                f"{label.lower()}_{'drafts' if _was_drafts else 'autosend'}.zip",
+                "application/zip")
+            st.caption(
+                ("Unzip it, then **double-click** `Prepare drafts (Windows).cmd` "
+                 "on Windows, or `send_all_mac.applescript` on Mac. Every message "
+                 "lands in your Drafts folder — nothing is sent until you send it."
+                 if _was_drafts else
+                 "Unzip it, then **double-click** `Send emails (Windows).cmd` on "
+                 "Windows, or `send_all_mac.applescript` on Mac. This sends them "
+                 "straight from your own Outlook or Apple Mail.")
+                + " Keep the files together in the unzipped folder.")
     else:  # links CSV
         df = pd.DataFrame([{"Team": r["team"], "Name": r["name"],
                             "Email": r.get("email", ""), "Link": r.get("link", "")}
@@ -632,7 +694,9 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
                                    reports=reports)
             _deliver(msgs, api, drafts, ok_label="Feedback delivered")
     elif m.startswith("Download .eml"):
-        if st.button("Build .eml files", key=f"{key}_eml"):
+        st.caption("✓ Nothing is sent by this method: you get a file per student "
+                   "to open, read and send from your own mail app.")
+        if st.button("Build the email files", key=f"{key}_eml", type="primary"):
             st.session_state[f"{key}_emlzip"] = emailpack.zip_folders({"Results":
                 emailpack.results_items(teams, roster, subj, body, attach_team,
                                         course, eval_no, report=report,
@@ -642,18 +706,34 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
             st.download_button("⬇ Download .eml zip", st.session_state[f"{key}_emlzip"],
                                "results_eml.zip", "application/zip")
     elif m.startswith("Download auto-send"):
-        if st.button("Build auto-send scripts", key=f"{key}_auto"):
+        drafts = _review_first(
+            key,
+            "The scripts put every message in your Drafts folder instead of "
+            "sending it, with the student's PDF already attached, so you can "
+            "read them in Outlook or Mail and send them yourself.")
+        if st.button("Build the scripts", key=f"{key}_auto", type="primary"):
             st.session_state[f"{key}_autozip"] = emailpack.send_all_pack(
                 emailpack.results_parts(teams, roster, subj, body, attach_team,
                                         course, eval_no, report=report,
                                         narratives=narratives,
-                                        reports=reports), "Results")
+                                        reports=reports), "Results", drafts=drafts)
+            st.session_state[f"{key}_autodrafts"] = drafts
         if st.session_state.get(f"{key}_autozip"):
-            st.download_button("⬇ Download auto-send zip", st.session_state[f"{key}_autozip"],
-                               "results_autosend.zip", "application/zip")
-            st.caption("Unzip, then just **double-click** — `Send emails (Windows).cmd` on "
-                       "Windows, or `send_all_mac.applescript` on Mac. Each student's PDF is "
-                       "attached automatically; keep the files together in the unzipped folder.")
+            _was_drafts = st.session_state.get(f"{key}_autodrafts", True)
+            st.download_button(
+                "⬇ Download the zip", st.session_state[f"{key}_autozip"],
+                f"results_{'drafts' if _was_drafts else 'autosend'}.zip",
+                "application/zip")
+            st.caption(
+                ("Unzip it, then **double-click** `Prepare drafts (Windows).cmd` "
+                 "on Windows, or `send_all_mac.applescript` on Mac. Every message "
+                 "lands in your Drafts folder with the student's PDF attached — "
+                 "nothing is sent until you send it."
+                 if _was_drafts else
+                 "Unzip it, then **double-click** `Send emails (Windows).cmd` on "
+                 "Windows, or `send_all_mac.applescript` on Mac. Each student's "
+                 "PDF is attached automatically.")
+                + " Keep the files together in the unzipped folder.")
     else:  # recipients CSV
         rows = []
         for t in teams:
@@ -730,6 +810,31 @@ def _deliver(messages, method, drafts_only, ok_label="Done"):
         st.dataframe(pd.DataFrame(result["failed"]))
 
 
+def _embed_html(markup: str) -> None:
+    """Put a snippet of HTML on the page, as invisibly as possible.
+
+    Only used for the scroll-to-top helper. It exists because
+    `st.components.v1.html` is deprecated with a removal date that has already
+    passed, so shipping a release that calls it invites a future Streamlit
+    upgrade to break the app. `st.iframe` is the replacement — but it rejects
+    `height=0`, which the old call accepted, so the two cannot simply be
+    swapped (found by booting the app against both versions). Whichever is
+    available is used, and if neither works the only consequence is that the
+    page does not scroll itself.
+    """
+    iframe = getattr(st, "iframe", None)
+    if iframe is not None:
+        try:
+            iframe(markup, height=1)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        components.html(markup, height=0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _scroll_to_top():
     """Send the viewport to the top on navigation.
 
@@ -742,7 +847,7 @@ def _scroll_to_top():
     into the Python app.
     """
     token = S.get("_nav_token", 0)
-    components.html(
+    _embed_html(
         f"""
         <script>
         /* nav-token:{token} — a changed token forces a remount + re-scroll */
@@ -768,8 +873,7 @@ def _scroll_to_top():
           }}
         }})();
         </script>
-        """,
-        height=0,
+        """
     )
 
 
@@ -788,7 +892,8 @@ def _start_here(course: str, eval_no: str) -> None:
         snap = None
     have_list = S.get("survey_contact_df") is not None or bool(snap)
     saved = bool(snap)
-    have_url = bool((S.get("inv_url") or getattr(cfg, "public_url", "") or "").strip())
+    have_url = bool((S.get("inv_url") or getattr(cfg, "public_url", "")
+                     or _this_app_url() or "").strip())
     try:
         responses = len(survey.all_responses(vault_now(), slug_now)) if saved else 0
     except Exception:  # noqa: BLE001
@@ -919,7 +1024,7 @@ with tabs[0]:
                 st.success("Parsed the export. Open **④ Results & reports** to see the "
                            "grades, then **⑤ Send feedback**.")
                 with st.expander("Preview parsed rows"):
-                    st.dataframe(q_long.head(30), use_container_width=True)
+                    st.dataframe(q_long.head(30), **FULL_WIDTH)
             elif q_long is not None:
                 st.warning("No evaluation rows found in that file. Use the file "
                            "Qualtrics gives you under Export → CSV, with its "
@@ -1074,11 +1179,53 @@ with tabs[0]:
                                     "of the dates below.")
 
     with st.expander("Schedule — open / close dates (optional)"):
-        st.caption(f"App server clock right now: **{dt.datetime.now():%b %d, %Y %I:%M %p}**. "
-                   "Dates below use this clock — set them relative to it.")
+        # ---- whose clock? ------------------------------------------------
+        # The app's own clock is the server's, which on Streamlit Cloud is UTC.
+        # An instructor in Arizona setting "closes Friday 5pm" was setting 5pm
+        # UTC — 10am their time — and the survey shut mid-morning. The clock is
+        # now something they state, and every open/close time is read against
+        # it. The browser offers the right answer, so the usual case is one
+        # click of confirmation rather than arithmetic.
+        _browser_offset = _browser_clock_offset()
+        if cur.get(survey.CLOCK_KEY) is None and _browser_offset is not None:
+            # Nobody has chosen yet, and the browser knows its own zone — so the
+            # usual case is that this is already right and the instructor only
+            # has to glance at it.
+            cur[survey.CLOCK_KEY] = _browser_offset
+        st.caption(survey.describe_clock(cur))
+        _server_now = dt.datetime.now()
+        ck1, ck2 = st.columns([1, 1.3])
+        _stated = ck1.time_input(
+            "What time is it where you are?",
+            survey.local_now(cur).time().replace(second=0, microsecond=0),
+            key="clock_now",
+            help="PeerParley compares your open and close times against this "
+                 "clock. Set it once per evaluation and the schedule means what "
+                 "it says — otherwise the times are read in the server's own "
+                 "time zone, which is usually UTC.")
+        if ck2.button("Set this as my clock", key="clock_set",
+                      **FULL_WIDTH):
+            cur[survey.CLOCK_KEY] = survey.offset_from_wall_clock(
+                dt.datetime.combine(_server_now.date(), _stated), _server_now)
+            S["survey_cfg"] = cur
+            st.rerun()
+        if survey.clock_offset(cur) and ck2.button(
+                "Use the server's clock instead", key="clock_reset",
+                **FULL_WIDTH):
+            cur[survey.CLOCK_KEY] = 0
+            S["survey_cfg"] = cur
+            st.rerun()
+        if _browser_offset is not None and survey.clock_offset(cur) != _browser_offset:
+            st.caption(f"Your browser says it is "
+                       f"{(_server_now + dt.timedelta(minutes=_browser_offset)):%I:%M %p} "
+                       f"where you are.")
+        st.caption("Every time below is on that clock — so is what students see.")
+        st.divider()
+
+        _local_now = survey.local_now(cur)
         use_open = st.checkbox("Set an OPEN date", value=bool(cur.get("opens_at")))
         if use_open:
-            _o = survey.parse_dt(cur.get("opens_at")) or dt.datetime.now()
+            _o = survey.parse_dt(cur.get("opens_at")) or _local_now
             co1, co2 = st.columns(2)
             od = co1.date_input("Opens on", _o.date(), key="open_d")
             ot = co2.time_input("Opens at", _o.time().replace(microsecond=0), key="open_t")
@@ -1087,7 +1234,7 @@ with tabs[0]:
             cur["opens_at"] = ""
         use_close = st.checkbox("Set a CLOSE date", value=bool(cur.get("closes_at")))
         if use_close:
-            _c = survey.parse_dt(cur.get("closes_at")) or (dt.datetime.now() + dt.timedelta(days=7))
+            _c = survey.parse_dt(cur.get("closes_at")) or (_local_now + dt.timedelta(days=7))
             cc1, cc2 = st.columns(2)
             cd = cc1.date_input("Closes on", _c.date(), key="close_d")
             ct = cc2.time_input("Closes at", _c.time().replace(microsecond=0), key="close_t")
@@ -1156,13 +1303,21 @@ with tabs[0]:
 
     st.divider()
     st.markdown("##### Send personal links")
+    _detected_url = _this_app_url()
     base_url = st.text_input(
-        "This app's web address", getattr(cfg, "public_url", "") or "",
+        "This app's web address",
+        (getattr(cfg, "public_url", "") or "") or _detected_url,
         key="inv_url",
         placeholder="https://your-peerparley-address",
-        help="Copy it from your browser's address bar while using this app. Each "
-             "student's link is this address plus a private code that opens only "
-             "their own form.")
+        help="Filled in from the address you are using right now. Each student's "
+             "link is this address plus a private code that opens only their own "
+             "form. Change it only if students should reach a different address "
+             "from the one you are on.")
+    if _detected_url and base_url.strip().rstrip("/") == _detected_url:
+        st.caption(f"Taken from the address you are using: `{_detected_url}`")
+    elif _detected_url and base_url.strip():
+        st.caption(f"Note: you are using `{_detected_url}` right now — the links "
+                   f"will point somewhere else.")
     _base_ok = bool(base_url.strip())
     # Two ways to email forty students a link that cannot work, both of which
     # used to pass without a word: sending before the survey is saved (the link
@@ -1180,7 +1335,7 @@ with tabs[0]:
         links = survey.student_links(base_url, slug, survey.build_teams(cdf),
                                      survey.token_secret(cfg))
         with st.expander(f"Preview {len(links)} links"):
-            st.dataframe(pd.DataFrame(links), use_container_width=True, height=280)
+            st.dataframe(pd.DataFrame(links), **FULL_WIDTH, height=280)
         subj = st.text_input("Email subject",
                              "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
         body = _email_body(DEFAULT_INVITE_BODY, key="inv_body")
@@ -1225,9 +1380,9 @@ with tabs[1]:
         by_team = (sdf.groupby("team")["responded"]
                    .agg(["sum", "count"]).reset_index()
                    .rename(columns={"sum": "responded", "count": "students"}))
-        st.dataframe(by_team, use_container_width=True)
+        st.dataframe(by_team, **FULL_WIDTH)
         with st.expander("Per-student status"):
-            st.dataframe(sdf, use_container_width=True, height=320)
+            st.dataframe(sdf, **FULL_WIDTH, height=320)
 
         nonresp = [r for r in status if not r["responded"]]
         if nonresp:
@@ -1238,7 +1393,8 @@ with tabs[1]:
                 # Reuse the URL entered on the ① Set up tab (single source of truth);
                 # fall back to the configured public_url secret.
                 _url_default = (st.session_state.get("inv_url")
-                                or getattr(cfg, "public_url", "") or "")
+                                or getattr(cfg, "public_url", "")
+                                or _this_app_url() or "")
                 base_url = st.text_input("Public app URL", _url_default, key="rem_url")
                 subj = st.text_input("Subject",
                                      "Reminder: your peer evaluation for {class}", key="rem_subj")
@@ -1444,7 +1600,7 @@ with tabs[3]:
             for _w in grading_warnings(S["long_df"], teams,
                                        _roster_names or None):
                 st.warning(_w, icon="⚠️")
-            st.dataframe(frame, use_container_width=True, height=380)
+            st.dataframe(frame, **FULL_WIDTH, height=380)
             st.download_button("⬇ Results CSV", frame.to_csv(index=False),
                                "peerparley_results.csv", "text/csv")
 
@@ -1641,7 +1797,7 @@ with tabs[5]:
                         row[f"E{en} Perf"] = m.performance if m else ""
                     rows.append(row)
                 cmp_df = pd.DataFrame(rows)
-                st.dataframe(cmp_df, use_container_width=True, height=360)
+                st.dataframe(cmp_df, **FULL_WIDTH, height=360)
                 st.download_button("⬇ comparison.csv", cmp_df.to_csv(index=False),
                                    f"peerparley_{course}_comparison.csv", "text/csv")
 
