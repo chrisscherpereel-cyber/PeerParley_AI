@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.13.0 — deleting a finished survey
+
+The sidebar's survey list only ever grew. After a few semesters of one course it
+is unusable, and there was no way to shorten it.
+
+Selecting a survey now offers **🗑 Delete this survey…**. It removes everything
+stored for that survey: the questions and schedule, the roster snapshot that
+student links resolve against, every collected response, and its AI drafts.
+Other surveys are untouched — including one whose name is a prefix of it, since
+`QA101-eval1` sits next to `QA101-eval10` and a careless prefix match would take
+both. That case is a test.
+
+Because this destroys student records and the vault has no trash:
+
+* the confirmation states what would go, counted — "2 student(s) in 1 team(s),
+  **2 collected response(s)**, the questions and the schedule — 5 stored items
+  in all";
+* where responses exist it asks for the survey's name to be typed, and the
+  delete button stays disabled until it matches;
+* it points at the **🔒 Vault** tab first, so an encrypted backup can be kept
+  if the responses might still be wanted;
+* only the owner or an administrator is offered it, and an instructor never sees
+  another instructor's surveys in the list to begin with;
+* a survey with nothing collected asks once and deletes — no typing for an
+  empty one.
+
+Reading what a deletion would destroy costs no response reads: the counts come
+from object names, because this runs while the instructor is looking at a
+sidebar. Deleting clears the read cache, so the survey leaves the list
+immediately rather than lingering for the cache's lifetime, and any state
+carried for it is dropped from the session.
+
+6 new tests (243 total), including a driver that works the sidebar through the
+real app: the button's absence on "New survey", both confirmation shapes, a
+mistyped name leaving everything in place, and the responses actually gone.
+
 ## 2.12.0 — why small clicks were slow
 
 Reported: *"the application still seems very slow when I am doing small tasks

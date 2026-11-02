@@ -459,6 +459,79 @@ def survey_owner(vault: Vault, slug: str) -> Optional[str]:
     return snap.get("owner", "") or ""
 
 
+def survey_objects(vault: Vault, slug: str) -> List[str]:
+    """Everything stored for one survey, by object name.
+
+    Listed rather than guessed, so a response for a team whose name was tidied
+    into something unexpected still turns up. Named separately from the delete
+    itself because the instructor is shown this list — with counts — before
+    anything is removed.
+    """
+    from .feedback_ai import drafts_key
+    try:
+        names = set(vault.list())
+    except Exception:  # noqa: BLE001
+        names = set()
+    wanted = []
+    for fixed in (key_survey(slug), key_roster(slug), drafts_key(slug)):
+        if fixed in names:
+            wanted.append(fixed)
+    wanted += sorted(n for n in names if str(n).startswith(_resp_prefix(slug)))
+    return wanted
+
+
+def describe_survey(vault: Vault, slug: str) -> Dict[str, Any]:
+    """What deleting this survey would destroy, for the confirmation to state.
+
+    Counts come from object names, so this costs one listing however large the
+    section is — it runs while the instructor is looking at a sidebar.
+    """
+    from .feedback_ai import drafts_key
+    objects = survey_objects(vault, slug)
+    snap = load_roster_snapshot(vault, slug) or {}
+    teams = snap.get("teams", {}) or {}
+    return {
+        "objects": objects,
+        "responses": sum(1 for n in objects
+                         if str(n).startswith(_resp_prefix(slug))),
+        "students": sum(len(v) for v in teams.values()),
+        "teams": len(teams),
+        "has_drafts": drafts_key(slug) in objects,
+        "owner": snap.get("owner", "") or "",
+        "course": snap.get("course", ""),
+        "eval_no": str(snap.get("eval_no", "") or ""),
+    }
+
+
+def delete_survey(vault: Vault, slug: str) -> Tuple[int, List[str]]:
+    """Delete one survey and everything stored with it. Returns (deleted, errors).
+
+    What goes: the questions and schedule, the roster snapshot that student
+    links resolve against, every collected response, and the AI drafts for this
+    survey. Nothing else — another survey's objects do not share these names,
+    which is asserted by a test, because a slug prefix is a blunt instrument and
+    "QA101-eval1" is a prefix of "QA101-eval10".
+
+    It is not recoverable: the vault has no trash. The caller is responsible for
+    asking first, and for telling the instructor they can keep an encrypted
+    bundle from the Vault tab beforehand if the responses still matter.
+    """
+    deleted, errors = 0, []
+    for name in survey_objects(vault, slug):
+        try:
+            vault.delete(name)
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+    # The listing and any remembered reads are now wrong; a stale one would
+    # leave the deleted survey in the picker.
+    try:
+        vault.refresh()
+    except Exception:  # noqa: BLE001
+        pass
+    return deleted, errors
+
+
 def list_surveys(vault: Optional[Vault] = None):
     """Every survey in the vault, with owner + counts, for the picker."""
     vault = vault or Vault()

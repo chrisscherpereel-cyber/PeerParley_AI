@@ -219,6 +219,91 @@ def _browser_clock_offset():
         return None
 
 
+def _delete_survey_control(entry: dict, user: dict, is_admin: bool) -> None:
+    """Remove a finished survey from the list, with everything stored for it.
+
+    Needed because the picker only ever grew: a few semesters of MGT 301 and the
+    dropdown is unusable. Deleting is the honest way to shorten it — hiding a
+    survey while its responses sit in storage would be a worse answer for
+    student records.
+
+    This destroys student data, so it asks first and says exactly what would go.
+    Where responses exist it asks for the survey's name to be typed, because a
+    section's collected evaluations are not something to lose to a stray click,
+    and the vault has no trash to recover them from.
+    """
+    slug = str(entry.get("slug") or "")
+    owner = entry.get("owner") or ""
+    if not slug:
+        return
+    if not survey.can_access(owner, user):
+        st.caption(f"Only `{owner or 'its owner'}` or an administrator can delete "
+                   f"this survey.")
+        return
+
+    flag = f"del_survey_{slug}"
+    if not S.get(flag):
+        if st.button("🗑 Delete this survey…", key=f"del_open_{slug}",
+                     help="Removes it from this list and deletes its questions, "
+                          "its student list, every collected response and any AI "
+                          "drafts. Not recoverable."):
+            S[flag] = True
+            st.rerun()
+        return
+
+    label = f"{entry.get('course') or '(no course)'} · Eval {entry.get('eval_no')}"
+    try:
+        info = survey.describe_survey(vault_now(), slug)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not read that survey: {exc}")
+        S[flag] = False
+        return
+
+    bits = [f"{info['students']} student(s) in {info['teams']} team(s)"]
+    if info["responses"]:
+        bits.append(f"**{info['responses']} collected response(s)**")
+    if info["has_drafts"]:
+        bits.append("the AI drafts")
+    st.warning(f"**Delete {label}?** This removes " + ", ".join(bits)
+               + ", the questions and the schedule — "
+               f"{len(info['objects'])} stored item(s) in all. It cannot be "
+               f"undone.", icon="🗑️")
+    if info["responses"]:
+        st.caption("If you might want these responses later, cancel and save an "
+                   "encrypted backup from the **🔒 Vault** tab first.")
+        typed = st.text_input(f"Type the survey's name to confirm: {label}",
+                              key=f"del_typed_{slug}",
+                              placeholder=label)
+        ready = typed.strip() == label
+    else:
+        st.caption("Nothing has been collected for this survey yet.")
+        ready = True
+
+    c1, c2 = st.columns(2)
+    if c1.button("Delete it", key=f"del_go_{slug}", type="primary",
+                 disabled=not ready):
+        deleted, errors = survey.delete_survey(vault_now(), slug)
+        S[flag] = False
+        # The picker's stored choice, and anything carried in session for this
+        # survey, now point at something that no longer exists.
+        for key in ("survey_pick", "survey_contact_df", "long_df", "self_evals",
+                    "roster", "teams", "pdf_zip", "survey_cfg",
+                    "_cfg_loaded_for", "_active_slug", ai_ui.STATE_KEY,
+                    "ai_narratives", "ai_reports", ai_ui.FP_KEY,
+                    ai_ui.LOADED_KEY):
+            S.pop(key, None)
+        if errors:
+            st.error(f"Deleted {deleted} item(s); {len(errors)} could not be "
+                     f"removed: " + "; ".join(errors[:3]))
+        else:
+            S["_deleted_survey_note"] = (
+                f"Deleted **{label}** and its {deleted} stored item(s).")
+        st.rerun()
+    if c2.button("Cancel", key=f"del_no_{slug}"):
+        S[flag] = False
+        st.rerun()
+
+
 def _report_settings(course: str, eval_no: str) -> dict:
     """Which sections a student's report shows.
 
@@ -367,6 +452,9 @@ with st.sidebar:
     elif S.pop("_ws_resumed", False):
         st.success("Session resumed.", icon="↩")
 
+    if S.get("_deleted_survey_note"):
+        st.success(S.pop("_deleted_survey_note"), icon="🗑️")
+
     _all = survey.list_surveys()
     _mine = survey.visible_surveys(_all, user)
     _labels = [f"{(s['course'] or '(no course)')} · Eval {s['eval_no']}"
@@ -381,6 +469,7 @@ with st.sidebar:
         course, eval_no = _s["course"], str(_s["eval_no"])
         st.caption(f"Editing **{course} · Eval {eval_no}**"
                    + (f" · owner `{_s['owner'] or 'unowned'}`" if is_admin else ""))
+        _delete_survey_control(_s, user, is_admin)
     S["course"], S["eval_no"] = course, eval_no
 
     # ---- Guard against cross-survey contamination ------------------------

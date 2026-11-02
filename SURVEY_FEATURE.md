@@ -122,6 +122,17 @@ Open / Scheduled / Closed for students right now. Then generate every student's
 personal link and either email it or download **links.csv** for your own mail
 merge.
 
+**Removing a finished survey.** The sidebar's survey list only ever grew — a few
+semesters of one course and the dropdown is unusable. Selecting a survey now
+offers **🗑 Delete this survey…**, which removes its questions, its schedule, the
+roster snapshot that student links resolve against, every collected response and
+its AI drafts. It states what will go before it does anything, and where
+responses exist it asks for the survey's name to be typed, because the vault has
+no trash: deletion is permanent. Save an encrypted bundle from the **🔒 Vault**
+tab first if the responses might still be wanted. Only the survey's owner or an
+administrator is offered the control, and an instructor never sees another
+instructor's surveys in the list at all.
+
 **Open / close dates.** The survey config carries optional `opens_at` /
 `closes_at` datetimes, read against the **scheduling clock** you set in the same
 panel (`clock_offset_minutes`, stored with the survey). That clock starts from

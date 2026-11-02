@@ -441,3 +441,116 @@ def test_the_second_visit_works_in_the_real_app(tmp_path):
     # says which one went.
     assert "PASS - the save button is not greyed out" in done.stdout
     assert "PASS - the student links were rebuilt" in done.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Deleting a finished survey
+# --------------------------------------------------------------------------- #
+# The picker only ever grew: a few semesters of one course and the dropdown is
+# unusable. Deleting is the honest way to shorten it — hiding a survey while its
+# responses sit in storage would be a worse answer for student records.
+
+def test_deleting_a_survey_removes_everything_stored_for_it(vault):
+    slug, teams, _ = set_up(vault)
+    submit(vault, slug, teams, 0, {1: 34, 2: 33, 3: 33},
+           confidential="A note for the instructor.")
+    submit(vault, slug, teams, 1, {0: 40, 2: 30, 3: 30})
+    # And an AI draft, which is stored per survey under its own name.
+    from peerparley import feedback_ai as fai
+    fai.save_drafts(vault, slug, {"ann-apple": fai.Draft(
+        key="ann-apple", name="Ann Apple", team="1", strengths="Text.")})
+    vault.refresh()
+
+    info = survey.describe_survey(vault, slug)
+    assert info["responses"] == 2
+    assert info["students"] == len(ROSTER)
+    assert info["has_drafts"] is True
+    assert len(info["objects"]) == 5           # survey, roster, drafts, 2 responses
+
+    deleted, errors = survey.delete_survey(vault, slug)
+    assert errors == []
+    assert deleted == 5
+    assert survey.load_roster_snapshot(vault, slug) is None
+    assert survey.all_responses(vault, slug) == []
+    assert survey.response_count(vault, slug) == 0
+    assert fai.load_drafts(vault, slug) == ({}, "")
+    assert slug not in {s["slug"] for s in survey.list_surveys(vault)}
+    # Nothing of this survey is left in the store under any name.
+    assert not [n for n in vault.list() if slug in str(n)]
+
+
+def test_deleting_one_survey_leaves_a_similarly_named_one_alone(vault):
+    """`QA101-eval1` is a prefix of `QA101-eval10`, which is exactly the way a
+    prefix match deletes the wrong student data."""
+    first, teams1, _ = set_up(vault)
+    submit(vault, first, teams1, 0, {1: 34, 2: 33, 3: 33})
+
+    tenth, teams10 = survey.save_setup("QA101", "10", contact_frame(),
+                                       dict(survey.DEFAULT_SURVEY), vault=vault,
+                                       owner="qa-instructor")
+    survey.save_response(vault, tenth, TEAM, 0,
+                         {"pos": 0, "team": TEAM, "members": {}})
+    vault.refresh()
+    assert first == "QA101-eval1" and tenth == "QA101-eval10"
+
+    survey.delete_survey(vault, first)
+    assert survey.load_roster_snapshot(vault, tenth) is not None
+    assert survey.response_count(vault, tenth) == 1
+    assert {s["slug"] for s in survey.list_surveys(vault)} == {tenth}
+
+
+def test_describing_a_survey_costs_no_response_reads(vault, monkeypatch):
+    """It runs while the instructor looks at a sidebar, so it counts names."""
+    slug, teams, _ = set_up(vault)
+    for pos in range(4):
+        submit(vault, slug, teams, pos,
+               {i: 33 for i in range(4) if i != pos} | {(pos + 1) % 4: 34})
+    vault.refresh()
+    survey.describe_survey(vault, slug)          # warm the roster read
+
+    reads = {"n": 0}
+    original = type(vault.backend).get
+    monkeypatch.setattr(type(vault.backend), "get",
+                        lambda self, name: (reads.__setitem__("n", reads["n"] + 1),
+                                            original(self, name))[1])
+    info = survey.describe_survey(vault, slug)
+    assert info["responses"] == 4
+    assert reads["n"] == 0
+
+
+def test_deleting_a_survey_that_is_not_there_is_not_an_error(vault):
+    deleted, errors = survey.delete_survey(vault, "never-existed-eval7")
+    assert (deleted, errors) == (0, [])
+
+
+def test_only_the_owner_or_an_admin_may_delete(vault):
+    """The rule the sidebar control enforces before it offers the button."""
+    assert survey.can_access("qa-instructor",
+                             {"user": "qa-instructor", "role": "instructor"})
+    assert not survey.can_access("qa-instructor",
+                                 {"user": "someone-else", "role": "instructor"})
+    assert survey.can_access("qa-instructor", {"user": "boss", "role": "admin"})
+    assert not survey.can_access("", {"user": "chris", "role": "instructor"})
+
+
+def test_the_delete_flow_works_in_the_real_app(tmp_path):
+    """Drives the sidebar: the button, both confirmations, and who may press it.
+
+    In a subprocess, like the other app drivers here — Streamlit's secrets are a
+    process-wide singleton. The driver is tests/_delete_survey_app.py.
+    """
+    import subprocess
+    done = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", "_delete_survey_app.py"),
+         str(tmp_path / "del")],
+        capture_output=True, text=True, timeout=900)
+    assert "FAILURES: none" in done.stdout, done.stdout[-3000:]
+    assert done.returncode == 0, done.stdout[-3000:]
+    for required in (
+            "PASS - no delete button while 'New survey' is selected",
+            "PASS - it asks for the name to be typed",
+            "PASS - and refuses until it matches",
+            "PASS - nothing was deleted while locked",
+            "PASS - the survey and its responses are gone",
+            "PASS - another instructor's survey is not in their list"):
+        assert required in done.stdout, done.stdout[-3000:]
