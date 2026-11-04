@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.14.1 — ModuleNotFoundError: dropbox, at sign-in
+
+Reported with a screenshot: signing in produced a traceback ending in
+`import dropbox`. My regression, from 2.10.0.
+
+That release split the dependencies into `requirements.txt` and
+`requirements-optional.txt`, and put the Dropbox SDK in the optional file.
+Streamlit Community Cloud installs **only** `requirements.txt`. So a deployment
+whose secrets said `backend = "dropbox"` — one that had been working for weeks —
+could not import its own storage, and the failure landed on the instructor's
+sign-in screen as a raw traceback.
+
+**The storage backends are back in `requirements.txt`**, where they belong:
+which one an app uses is a line in its secrets, not a code change, so every
+backend the app offers has to be installed by default. `msal` was already
+there; `dropbox` is again; pCloud needs nothing beyond `requests`. A test now
+reads `requirements.txt` and fails if any backend's package is missing from it.
+
+**And a backend that cannot be opened is no longer fatal.** `Vault()` is built
+in a dozen places, including the sign-in path, so a configuration problem has
+to be reportable rather than explosive:
+
+* it now remembers the failure instead of raising during construction, and
+  reports it as `VaultUnavailable` with a message an instructor can act on —
+  which package to add, to which file, or which setting to change;
+* the app checks storage before the sign-in box and shows that message on a
+  screen of its own, with what usually causes it, rather than letting someone
+  sign in "successfully" into an app that cannot save anything;
+* it says plainly that nothing has been lost, because the app has not been able
+  to write anything either;
+* a student opening their link sees the ordinary "this evaluation isn't
+  available right now" — never the institution's storage configuration;
+* `selfcheck.py` now checks that the configured backend's package is installed.
+  That is precisely the question it exists to ask, and it was not asking it.
+
+9 new tests (261 total), including a driver that hides the `dropbox` module
+from the import system and walks the whole failure: the library, the
+instructor's screen, and what the student sees.
+
 ## 2.14.0 — the instructor summary's metrics were four copies of one bug
 
 Reported: *"in the instructor summary the metrics don't seem to be reporting

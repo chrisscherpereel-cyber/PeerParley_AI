@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 258 passed
+python3 -m pytest tests/ -q          # expect: 261 passed
 python3 qa_regression.py             # expect: 93/93 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
@@ -79,6 +79,10 @@ a file-write on a hosted server (where the file would not survive a restart).
 
 ## 5. Known limits, stated rather than hidden
 
+- **A storage backend's package must be in `requirements.txt`,** not in
+  `requirements-optional.txt`: Streamlit Community Cloud installs only the
+  first file, so an optional backend package means a deployment that cannot
+  open its own storage. A test enforces this; do not "tidy" them back out.
 - **`local` storage is for trying it out.** The files are encrypted, but they
   sit beside the app and a hosted restart can wipe them. Real student records
   belong in Microsoft 365, Dropbox or pCloud (`DEPLOYMENT.md`).

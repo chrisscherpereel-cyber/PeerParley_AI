@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import io
 import os
-from typing import Any, Dict, List, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import requests
 
@@ -258,15 +258,45 @@ class PCloudBackend:
 # --------------------------------------------------------------------------- #
 # Factory + encrypted convenience wrapper
 # --------------------------------------------------------------------------- #
+class VaultUnavailable(RuntimeError):
+    """This app cannot reach its storage at all, and why — in plain words.
+
+    Its own type because the cause is almost always configuration rather than a
+    fault: a backend chosen in secrets whose package is not installed, or
+    credentials that are not filled in. Those used to surface as a raw
+    `ModuleNotFoundError: dropbox` traceback on the sign-in screen, which tells
+    an instructor nothing they can act on and looks like the app is broken.
+    """
+
+
+# Which package each backend needs, for the message when it is missing.
+_BACKEND_PACKAGE = {"dropbox": "dropbox", "m365": "msal"}
+
+
 def _make_backend(cfg: VaultConfig) -> StorageBackend:
     b = cfg.backend.lower()
-    if b == "m365":
-        return M365Backend(cfg.folder, cfg.options)
-    if b == "dropbox":
-        return DropboxBackend(cfg.folder, cfg.options)
-    if b == "pcloud":
-        return PCloudBackend(cfg.folder, cfg.options)
-    return LocalBackend(cfg.folder)
+    try:
+        if b == "m365":
+            return M365Backend(cfg.folder, cfg.options)
+        if b == "dropbox":
+            return DropboxBackend(cfg.folder, cfg.options)
+        if b == "pcloud":
+            return PCloudBackend(cfg.folder, cfg.options)
+        return LocalBackend(cfg.folder)
+    except ImportError as exc:
+        package = _BACKEND_PACKAGE.get(b, b)
+        raise VaultUnavailable(
+            f"Storage is set to '{b}', but the `{package}` package is not "
+            f"installed here, so this app cannot open it. Add `{package}` to "
+            f"requirements.txt and redeploy — on Streamlit Community Cloud that "
+            f"is the only file it installs — or change `[vault] backend` in the "
+            f"app's secrets to one that is available."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise VaultUnavailable(
+            f"Storage is set to '{b}', but it could not be opened: {exc}. "
+            f"Check the `[vault.{b}]` settings in the app's secrets."
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -322,7 +352,33 @@ class Vault:
 
     def __init__(self, cfg: VaultConfig | None = None):
         self.cfg = cfg or load_config().vault
-        self.backend = _make_backend(self.cfg)
+        # Constructing the backend can fail for reasons the instructor can fix,
+        # and `Vault()` is built in a dozen places including the sign-in path.
+        # So the failure is remembered rather than raised here: the sidebar
+        # healthcheck and the setup screen can then say what is wrong, and only
+        # an actual read or write raises.
+        self._backend: Optional[StorageBackend] = None
+        self._error = ""
+        try:
+            self._backend = _make_backend(self.cfg)
+        except VaultUnavailable as exc:
+            self._error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            self._error = f"Storage could not be opened: {exc}"
+
+    @property
+    def backend(self) -> StorageBackend:
+        if self._backend is None:
+            raise VaultUnavailable(self._error or "Storage is not available.")
+        return self._backend
+
+    @property
+    def available(self) -> bool:
+        return self._backend is not None
+
+    @property
+    def error(self) -> str:
+        return self._error
 
     @property
     def name(self) -> str:
@@ -340,7 +396,7 @@ class Vault:
         section's data to the other. The test suite found this immediately —
         which is the argument for the absolute path being in the key.
         """
-        return (f"{self.cfg.backend}:{getattr(self.backend, 'root', '')}",
+        return (f"{self.cfg.backend}:{getattr(self._backend, 'root', '')}",
                 str(self.cfg.folder))
 
     def refresh(self) -> None:
@@ -428,6 +484,8 @@ class Vault:
         instructor found out only after typing in forty students and clicking
         Save. The key is checked here, in memory, with no round trip.
         """
+        if not self.available:
+            return False, self._error
         try:
             # Through the cache: this check runs on every rerun, and it was the
             # last thing still making a round trip on each one. A green badge
@@ -435,6 +493,8 @@ class Vault:
             # charging the instructor a network call per click; a store that
             # goes away is still reported within that window.
             self.list()
+        except VaultUnavailable as exc:
+            return False, str(exc)
         except Exception as exc:  # noqa: BLE001
             return False, f"Storage '{self.cfg.backend}' is not reachable: {exc}"
         try:

@@ -838,8 +838,20 @@ def render_student_app(token: str) -> None:
     pos = int(payload.get("p", -1))
 
     vault = Vault()
-    snap = load_roster_snapshot(vault, slug)
-    survey = load_survey(vault, slug)
+    if not vault.available:
+        # The instructor's storage is misconfigured or unreachable. A student
+        # can do nothing about that and should not be shown the reason, which
+        # names the institution's storage setup — they get the same short
+        # message as any other "not right now", and their link keeps working
+        # once it is fixed.
+        st.error("This evaluation isn't available right now. Please try again "
+                 "later, or contact your instructor if it continues.")
+        return
+    try:
+        snap = load_roster_snapshot(vault, slug)
+        survey = load_survey(vault, slug)
+    except Exception:  # noqa: BLE001
+        snap, survey = None, dict(DEFAULT_SURVEY)
     if not snap:
         st.error("This evaluation isn't available right now. Please try again later.")
         return

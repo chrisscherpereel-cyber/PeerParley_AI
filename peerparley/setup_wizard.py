@@ -86,6 +86,53 @@ def needed() -> bool:
     return not has_credential() or not key_is_usable()
 
 
+def storage_problem() -> str:
+    """Why this app cannot reach its storage, or "" when it can.
+
+    Separate from `needed()` because the remedy is different: this is not a
+    password or a key to generate, it is a backend that is misconfigured or
+    whose package is not installed. It used to arrive as a raw
+    `ModuleNotFoundError: dropbox` traceback on the sign-in screen — an
+    instructor cannot act on that, and it looks like the app itself is broken.
+    """
+    try:
+        from .vault import Vault
+        vault = Vault()
+        if not vault.available:
+            return vault.error
+        ok, message = vault.healthcheck()
+        # A missing encryption key is the setup screen's business, not this
+        # one's; only report the storage side here.
+        return "" if (ok or "encryption" in message.lower()) else message
+    except Exception as exc:  # noqa: BLE001
+        return f"Storage could not be opened: {exc}"
+
+
+def render_storage_problem(message: str) -> None:
+    """Say what is wrong with storage, and what fixes it. The caller stops."""
+    st.markdown("### This app cannot reach its storage")
+    st.error(message, icon="🗄️")
+    st.markdown(
+        "Nothing is lost: PeerParley has not been able to read or write "
+        "anything, so whatever is stored is still there, exactly as it was."
+    )
+    with st.expander("What usually causes this"):
+        st.markdown(
+            "- **A package the storage backend needs is not installed.** On "
+            "Streamlit Community Cloud only `requirements.txt` is installed, so "
+            "a backend whose package is missing from that file fails here — "
+            "`dropbox` for Dropbox, `msal` for Microsoft 365. Add the line, "
+            "commit, and the app redeploys itself.\n"
+            "- **The credentials in the app's secrets are incomplete.** Check "
+            "the `[vault.…]` section against `.streamlit/secrets.toml.example`.\n"
+            "- **The provider is temporarily unreachable.** Reload in a minute.\n\n"
+            "`python3 selfcheck.py` checks all of this from a terminal and says "
+            "which it is."
+        )
+    st.caption("Students opening their links see a short 'not available right "
+               "now' message meanwhile — not this screen.")
+
+
 # --------------------------------------------------------------------------- #
 # The values, and the file
 # --------------------------------------------------------------------------- #

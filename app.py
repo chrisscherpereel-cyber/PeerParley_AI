@@ -114,6 +114,15 @@ if _token:
 # say so with a shell one-liner and no buttons on the page. The setup screen
 # stands in front of the sign-in form in exactly those two states, and nowhere
 # else — see peerparley/setup_wizard.py for why that is safe.
+# Storage first: a backend that cannot be opened — a missing package, or
+# credentials that are not filled in — used to reach the instructor as a raw
+# traceback on the sign-in screen, and signing in "successfully" into an app
+# that cannot save anything is worse than being told.
+_storage_problem = setup_wizard.storage_problem()
+if _storage_problem:
+    setup_wizard.render_storage_problem(_storage_problem)
+    st.stop()
+
 if setup_wizard.needed():
     setup_wizard.render()
     st.stop()

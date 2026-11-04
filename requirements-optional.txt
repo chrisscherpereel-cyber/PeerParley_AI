@@ -11,10 +11,6 @@
 # On Streamlit Community Cloud there is no second file: add the lines you need
 # to requirements.txt, since that is the only file the deploy installs.
 
-# ---- Storage backends other than Microsoft 365 ---------------------------- #
-# pCloud needs nothing extra (plain HTTPS). Dropbox needs its SDK.
-dropbox>=11.36,<13
-
 # ---- Convenience in the app ---------------------------------------------- #
 # Renders a PDF inside the app so you can look at a report without
 # downloading it. Without it, the download buttons still work.

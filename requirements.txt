@@ -24,10 +24,13 @@ reportlab>=4.1,<6           # the PDF reports
 cryptography>=42.0,<60      # encrypts every stored student record
 requests>=2.32,<3           # talking to your storage provider
 
-# Microsoft 365 / OneDrive / SharePoint storage and email. Kept here rather
-# than in the optional file because it is the storage DEPLOYMENT.md recommends
-# for student records, and the default email mode.
-msal>=1.28,<2
+# The storage backends. These are NOT optional in practice: which one you use
+# is a line in your secrets, and Streamlit Community Cloud installs only this
+# file — so moving them out (as 2.10.0 briefly did) turns changing that line
+# into "ModuleNotFoundError: dropbox" at sign-in, on a deployment that was
+# working. pCloud needs nothing beyond requests, which is already above.
+msal>=1.28,<2          # Microsoft 365 / OneDrive / SharePoint, and Graph email
+dropbox>=11.36,<13     # Dropbox
 
 # Backs off and retries an AI request that was rate-limited or timed out.
 # Small, pure Python; without it a single rate limit becomes a failed draft.

@@ -153,6 +153,19 @@ def check_config() -> None:
             "PeerParley will not let you email links without it.")
 
     backend = cfg.vault.backend
+    # The package the chosen backend needs. This is the check that would have
+    # caught a deployment whose secrets said "dropbox" while requirements.txt
+    # did not: it failed at sign-in with a bare ModuleNotFoundError instead.
+    needs = {"dropbox": "dropbox", "m365": "msal"}.get(backend)
+    if needs:
+        try:
+            importlib.import_module(needs)
+            say(OK, f"the {backend} backend's package ({needs}) is installed")
+        except Exception:  # noqa: BLE001
+            say(BAD, f"storage is set to '{backend}' but `{needs}` is not installed",
+                f"The app cannot open your storage. Add `{needs}` to\n"
+                "requirements.txt and redeploy — on Streamlit Community Cloud\n"
+                "that is the only file it installs — or change [vault] backend.")
     if backend == "local":
         say(WARN, "storage is set to 'local'",
             "Encrypted files are kept beside the app. Fine for trying it out,\n"

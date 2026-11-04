@@ -288,3 +288,71 @@ def test_the_setup_screen_configures_the_app_and_sign_in_then_works(
     assert "pp_user" not in wrong.session_state
     assert any("Wrong username or password" in str(getattr(e, "value", ""))
                for e in wrong.error)
+
+
+# --------------------------------------------------------------------------- #
+# Storage backends must be installable without editing requirements.txt
+# --------------------------------------------------------------------------- #
+
+def test_every_storage_backend_ships_its_package_in_requirements():
+    """The regression this exists for.
+
+    2.10.0 split the dependencies and moved `dropbox` into an optional file.
+    Streamlit Community Cloud installs only `requirements.txt`, so a deployment
+    whose secrets said `backend = "dropbox"` — one that had been working —
+    started failing at sign-in with `ModuleNotFoundError: dropbox`.
+
+    Which backend an app uses is a line in its secrets, not a code change, so
+    every backend the app offers has to be installed by default.
+    """
+    from peerparley.vault import _BACKEND_PACKAGE
+    text = open(os.path.join(REPO, "requirements.txt"), encoding="utf-8").read()
+    installed = {line.split("#")[0].strip().split(">=")[0].split("==")[0].strip()
+                 for line in text.splitlines() if line.split("#")[0].strip()}
+    for backend, package in _BACKEND_PACKAGE.items():
+        assert package in installed, (
+            f"storage backend '{backend}' needs `{package}`, which is not in "
+            f"requirements.txt — a deployment using it would fail at sign-in")
+
+
+def test_a_missing_backend_package_is_explained_not_raised(tmp_path):
+    """Drives the whole failure in a fresh process: the library, the
+    instructor's screen, and what a student sees. The driver is
+    tests/_missing_backend_app.py."""
+    import subprocess
+    done = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", "_missing_backend_app.py"),
+         str(tmp_path / "mb")],
+        capture_output=True, text=True, timeout=900)
+    assert "FAILURES: none" in done.stdout, done.stdout[-3000:]
+    assert done.returncode == 0, done.stdout[-3000:]
+    for required in (
+            "PASS - it is not a bare ModuleNotFoundError",
+            "PASS - the message names the package to install",
+            "PASS - it explains the storage problem instead of showing a sign-in box",
+            "PASS - a student is told it is unavailable, not why"):
+        assert required in done.stdout, done.stdout[-3000:]
+
+
+def test_selfcheck_flags_a_backend_whose_package_is_missing(tmp_path):
+    """`selfcheck.py` exists to answer "is this installation usable?" and this
+    is exactly the question it failed to ask."""
+    import subprocess
+    env = dict(os.environ)
+    env.update(VAULT_BACKEND="dropbox", FERNET_KEY=Fernet.generate_key().decode())
+    script = (
+        "import builtins, runpy, sys\n"
+        "real = builtins.__import__\n"
+        "def guarded(name, *a, **kw):\n"
+        "    if name == 'dropbox' or name.startswith('dropbox.'):\n"
+        "        raise ModuleNotFoundError(\"No module named 'dropbox'\")\n"
+        "    return real(name, *a, **kw)\n"
+        "builtins.__import__ = guarded\n"
+        f"sys.argv = ['selfcheck.py']\n"
+        f"runpy.run_path({os.path.join(REPO, 'selfcheck.py')!r}, run_name='__main__')\n"
+    )
+    done = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=300)
+    assert "storage is set to 'dropbox' but `dropbox` is not installed" in done.stdout
+    assert "requirements.txt" in done.stdout
+    assert done.returncode == 1          # a problem, not a warning
