@@ -45,6 +45,7 @@ from peerparley import workspace
 from peerparley.grading import (
     GradeSettings,
     compute,
+    adjustment_note as grading_note,
     data_warnings as grading_warnings,
     results_to_frame,
 )
@@ -1765,6 +1766,11 @@ with tabs[3]:
             for _w in grading_warnings(S["long_df"], teams,
                                        _roster_names or None):
                 st.warning(_w, icon="⚠️")
+            # When every adjustment is zero the table looks broken. It usually
+            # is not: say which of the instructor's own settings produced it.
+            _flat = grading_note(teams, settings)
+            if _flat:
+                st.info(_flat, icon="📐")
             st.dataframe(frame, **FULL_WIDTH, height=380)
             st.download_button("⬇ Results CSV", frame.to_csv(index=False),
                                "peerparley_results.csv", "text/csv")

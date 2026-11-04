@@ -272,6 +272,7 @@ def compute(
         dims: Dict[str, List[List[float]]] = {k: [[], [], [], []] for k in member_keys}
         ranks_recv: Dict[str, List[float]] = {k: [] for k in member_keys}
         authored: Dict[str, List[str]] = {k: [] for k in member_keys}  # comments WRITTEN by k
+        authored_slots: Dict[str, int] = {}   # teammates each student was asked about
         display_name: Dict[str, str] = {}
         has_texts = ("contribution_text" in long_df.columns
                      and "improve_text" in long_df.columns)
@@ -284,6 +285,11 @@ def compute(
                 contrib[k] = []; improve[k] = []
                 dims[k] = [[], [], [], []]; ranks_recv[k] = []
             authored.setdefault(e, [])
+            # Every teammate this student was asked about, whether or not they
+            # wrote anything: the denominator for "the quality of the feedback
+            # you wrote". Without it, skipping three teammates and writing one
+            # good comment would score the same as writing four.
+            authored_slots[e] = authored_slots.get(e, 0) + 1
             if r["points"] == r["points"]:
                 received[k].append(float(r["points"]))
             if r.get("public_comment"):
@@ -394,16 +400,42 @@ def compute(
                 return None
             return float(x) / float(avg)
 
+        # ---- written support for each student's ratings (Q) ------------------
+        # The AVERAGE of the comments written about a student, not the best one.
+        # Taking the best made Q a property of the team rather than the student:
+        # one articulate teammate writes well about everyone, so everybody's Q
+        # came out the same, and in the instructor summary the column looked
+        # broken because it was — within a team it could not vary.
+        #
+        # Two cases that are not the student's doing are handled deliberately:
+        # a survey that collected no written feedback at all leaves the
+        # dampener inactive (Q = 1.0 for everyone, so numbers-only sections
+        # still grade), and a student whose teammates all left their boxes
+        # blank, in a team where others did write, takes the team's average
+        # rather than a zero they did not earn or a free pass they did not
+        # either.
+        q_scores: Dict[str, float] = {}
+        q_points: Dict[str, int] = {}
+        for _k in member_keys:
+            _mine = [c for c in pub.get(_k, []) if c and c.strip()]
+            if not _mine:
+                continue
+            _others = [c for kk, cl in pub.items() if kk != _k for c in cl]
+            _scored = [score_comment(c, _others, settings.max_comment_points)
+                       for c in _mine]
+            q_scores[_k] = float(np.mean([s.q for s in _scored]))
+            q_points[_k] = int(round(q_scores[_k] * settings.max_comment_points))
+        team_q = float(np.mean(list(q_scores.values()))) if q_scores else 1.0
+
         members: List[StudentResult] = []
         for k in member_keys:
             all_pub = pub.get(k, [])
-            others = [c for kk, cl in pub.items() if kk != k for c in cl]
-            best_q, best_pts = 0.0, 0
-            for c in all_pub:
-                cs = score_comment(c, others, settings.max_comment_points)
-                if cs.q >= best_q:
-                    best_q, best_pts = cs.q, cs.points
-            Q = best_q if all_pub else 1.0   # neutral when no comments were written about them
+            if q_scores:
+                Q = q_scores.get(k, team_q)
+                best_pts = q_points.get(k, int(round(team_q *
+                                                     settings.max_comment_points)))
+            else:
+                Q, best_pts = 1.0, 0      # nothing written anywhere: no dampening
 
             rec = received.get(k, [])
             received_total = float(np.sum(rec)) if rec else 0.0
@@ -496,14 +528,25 @@ def compute(
             self_letters = [letter_grade(v) for v in self_vals]
 
             # ---- response quality: score the feedback THIS student WROTE ----
+            # The average across the teammates they were asked about, not their
+            # best single comment. Taking the best meant one careful comment and
+            # "fine" for the other three scored full marks, and — with the old
+            # coarse scorer — every student landed on the same number anyway.
+            # Teammates they wrote nothing about count as zero, which is the
+            # difference between scoring effort and scoring one good sentence.
             my_written = authored.get(k, [])
             others_written = [c for kk, cl in authored.items() if kk != k for c in cl]
-            rq, rpts = 0.0, 0
-            for c in my_written:
-                cs = score_comment(c, others_written, settings.max_comment_points)
-                if cs.q >= rq:
-                    rq, rpts = cs.q, cs.points
-            response_Q = rq if my_written else float("nan")
+            slots = max(authored_slots.get(k, 0), len(my_written))
+            if slots:
+                total_q = sum(
+                    score_comment(c, others_written,
+                                  settings.max_comment_points).q
+                    for c in my_written)
+                rq = total_q / slots
+                rpts = int(round(rq * settings.max_comment_points))
+            else:
+                rq, rpts = float("nan"), 0
+            response_Q = rq
 
             recv_contrib = contrib.get(k, []) if has_texts else list(all_pub)
             recv_improve = improve.get(k, []) if has_texts else []
@@ -532,6 +575,48 @@ def compute(
 
     results.sort(key=lambda t: t.team.lower())
     return results
+
+
+def adjustment_note(teams: List["TeamResult"],
+                    settings: Optional[GradeSettings] = None) -> str:
+    """Why is every grade adjustment zero? Said plainly, or "" when some moved.
+
+    A section where nothing moved looks like a broken report — it is the shape
+    the instructor sees when a column is "the same for all students". Usually
+    nothing is broken: the adjustment is deliberately scaled by sensitivity, by
+    evaluator agreement and by how well the written comments support the
+    ratings, and then rounded. Three factors of about a half, a quarter and a
+    rounding step of 5% multiply out to nothing for a normal section.
+
+    So rather than leave the instructor to infer that, the arithmetic is stated
+    with their own numbers, along with the two settings that change it.
+    """
+    members = [m for t in teams for m in t.members]
+    if not members or any(abs(m.signed_pct) > 1e-9 for m in members):
+        return ""
+    settings = settings or GradeSettings()
+    qs = [m.Q for m in members if m.Q == m.Q]
+    spread = [m.pay_grade for m in members if m.pay_grade == m.pay_grade]
+    mean_q = (sum(qs) / len(qs)) if qs else 1.0
+    widest = max((abs(p - 1.0) for p in spread), default=0.0)
+    implied = settings.sensitivity_B * mean_q * widest * 100.0
+    step = int(settings.rounding_step or 0)
+    bits = [f"No student's grade moved from the team score."]
+    bits.append(
+        f"The furthest anyone sat from their team's average was "
+        f"{widest:.0%}, and written support averaged {mean_q:.2f}, so at "
+        f"sensitivity {settings.sensitivity_B:g} the largest adjustment this "
+        f"section could produce was about {implied:.1f}%")
+    if step:
+        bits.append(f"which rounds to 0 in {step}% steps.")
+        if step > 1:
+            bits.append("Switch rounding to 1% steps on the Grading rules tab "
+                        "to let differences this size reach the grade, or raise "
+                        "sensitivity.")
+    else:
+        bits.append("— too small to show.")
+        bits.append("Raise sensitivity on the Grading rules tab to widen it.")
+    return " ".join(bits)
 
 
 def data_warnings(long_df: pd.DataFrame,

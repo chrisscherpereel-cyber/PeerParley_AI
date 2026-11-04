@@ -386,14 +386,28 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
     legend = [
         "TmPl / Qty / Qual / Effect = letter grades from the 4-statement rating matrix.",
         "Pay = average received allocation vs the team average.  Ratio = received vs fair share.",
-        "A = evaluator agreement weight.  Q = support behind the ratings received (drives the multiplier).",
-        "Resp.Pts = points earned for the QUALITY of the feedback this student wrote.",
+        "A = evaluator agreement weight (lower when evaluators disagreed about this student).",
+        "Q = average quality of the comments written ABOUT this student; it scales the adjustment.",
+        "Resp.Pts = average quality of the feedback this student wrote, across their teammates.",
         "Mult = final grade multiplier.  Grade Δ = signed adjustment vs the team score.",
         "Perf = performance from the forced ranking (High / Adequate / Low).",
     ]
     for ln in legend:
         c.setFont("Helvetica", 8); c.setFillColor(B.GREY)
         c.drawString(MARGIN, yy[0], "• " + ln); yy[0] -= 11
+
+    # A section where nothing moved reads as a broken report. Explain it here
+    # too: this PDF is what gets filed and forwarded, often without the app
+    # open beside it.
+    from .grading import adjustment_note
+    _flat = adjustment_note(teams)
+    if _flat:
+        yy[0] -= 6
+        c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 8)
+        c.drawString(MARGIN, yy[0], "Why every Grade ∆ is 0%"); yy[0] -= 11
+        c.setFont("Helvetica", 8); c.setFillColor(B.GREY)
+        yy[0] = _wrap(c, _flat, MARGIN, yy[0], pw - 2 * MARGIN,
+                      "Helvetica", 8, 11, B.GREY)
 
     # ---- confidential comments to the instructor ----
     conf_rows = [(t.team, m.name, [x for x in m.confidential_comments if x.strip()])

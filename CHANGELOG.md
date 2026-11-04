@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.14.0 — the instructor summary's metrics were four copies of one bug
+
+Reported: *"in the instructor summary the metrics don't seem to be reporting
+correctly, they are same for all students regardless of input."* Measured, that
+was true of four columns, and all four came from `score_comment`.
+
+It was `passed / 5` over five all-or-nothing thresholds, so it could return only
+six values — and on ten realistic comments **nine returned exactly 0.20**, a
+one-word "fine" scoring the same as a thoughtful nineteen-word sentence, because
+one word trivially passes the "variety" check. That constant was the **Q**
+column; times ten it was the **Resp.Pts** column; and because Q multiplies the
+grade adjustment it removed four fifths of every adjustment, which 5% rounding
+then took to zero, flattening **Mult** and **Grade Δ** for the whole section.
+The rendering was never at fault.
+
+**The score now distinguishes comments.** Each component is a ramp, not a cliff,
+weighted by what it says about whether a comment substantiates a rating:
+substance 45%, naming something concrete 30%, more than one sentence 10%, varied
+prose 15%. Length counts only in proportion to variety, so padding cannot buy a
+score (200 repetitions of "good" scores 0.13, where it used to score 0.35). The
+keyword list now covers the nouns of project work as well as the verbs, and
+longer stems match inside a word — "rebuilt the financial model" was being
+scored as naming nothing at all. On ten real comments the score runs 0.98 → 0.07
+monotonically, with nine distinct values.
+
+**Two aggregations changed, both chosen deliberately.** Q is the *average* of
+the comments written about a student rather than the best one, which had made it
+a property of the team — one articulate teammate lifted everybody's Q
+identically. And Resp.Pts is the average across the teammates a student was
+asked about, with a teammate they skipped counting as zero; one careful comment
+plus three "fine"s used to score full marks. A survey with no written feedback at
+all leaves the dampener inactive, so numbers-only sections still grade, and a
+student whose teammates all left their boxes blank takes the team average rather
+than a zero they did not earn.
+
+**And when nothing moves, the app says why.** A section where every Grade Δ is
+0% reads as a broken report. Usually nothing is broken: sensitivity, agreement,
+written support and the rounding step multiply out to less than one step. The
+Results tab and the summary PDF now state that arithmetic with the instructor's
+own numbers — "the furthest anyone sat from their team's average was 4%, and
+written support averaged 0.23, so at sensitivity 0.5 the largest adjustment this
+section could produce was about 0.5%, which rounds to 0 in 5% steps" — and name
+the two settings that change it.
+
+Q still dampens the adjustment, which is the original design and is now worth
+keeping because it finally varies.
+
+15 new tests (258 total), including one that reads the finished PDF and asserts
+that every column the complaint named differs between students.
+
 ## 2.13.0 — deleting a finished survey
 
 The sidebar's survey list only ever grew. After a few semesters of one course it

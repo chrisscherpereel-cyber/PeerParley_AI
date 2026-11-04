@@ -152,3 +152,54 @@ A fifth change is cosmetic but visible: the B−/B boundary was 0.78, which made
 B− twice as wide as every other band and B a 0.03 sliver. It is 0.71, restoring
 the uniform 0.07 bands. This affects the letter shown beside a rating dimension,
 not the grade adjustment.
+
+## What changed in 2.14.0 — the comment-support score Q
+
+Reported from use: the instructor summary's metrics "are same for all students
+regardless of input." Four columns were, and all four came from one function.
+
+**The score could only return six values.** `score_comment` was `passed / 5`
+over five all-or-nothing thresholds — 25+ words, 150+ characters, 2+ sentences,
+enough variety, 2+ keywords. Measured on ten realistic comments, **nine
+returned exactly 0.20**, a one-word "fine" among them, because a single word
+trivially passes the variety check. So:
+
+* **Q** (written support) was a constant 0.20;
+* **Resp.Pts** was a constant 2;
+* and because Q multiplies the adjustment — `1 + B · A · Q · (ratio − 1)` — it
+  removed about four fifths of every adjustment, which the 5% rounding step then
+  took to zero. **Mult** and **Grade Δ** came out identical for the whole
+  section.
+
+Each component is now a ramp rather than a cliff, weighted by what it says about
+whether a comment substantiates a rating: how much was written (45%), whether it
+names something concrete (30%), whether it is more than one sentence (10%), and
+whether it is varied prose (15%). Length only counts in proportion to variety,
+so padding cannot buy a score — 200 repetitions of "good" scores 0.13, not 0.35.
+The keyword list covers the nouns of project work as well as the verbs, and
+longer stems match inside a word, so "rebuilt the financial model" is no longer
+scored as naming nothing. Repetition and copy-paste penalties are unchanged.
+
+On the ladder of ten real comments the score now runs 0.98 → 0.07, monotonically.
+
+**Q is the average of the comments written about a student, not the best one.**
+Taking the best made Q a property of the *team*: one articulate teammate writes
+carefully about everyone, so everybody's Q came out the same and the column
+could not vary within a team. Two cases that are not the student's doing are
+handled deliberately: a survey that collected no written feedback at all leaves
+the dampener inactive (Q = 1.0 for everyone, so numbers-only sections still
+grade), and a student whose teammates all left their boxes blank, in a team
+where others wrote, takes the team's average rather than a zero they did not
+earn.
+
+**Resp.Pts is the average across the teammates a student was asked about**, not
+their single best comment, and teammates they wrote nothing about count as zero.
+One careful comment plus three "fine"s used to score full marks.
+
+**Q still dampens the adjustment**, which is a deliberate choice: ratings backed
+by written evidence move a grade more than bare numbers do. The practical
+consequence is worth planning around — in a section where everyone writes
+briefly, Q sits near 0.3, which with sensitivity 0.5 turns an 11% pay-grade
+difference into about 1.5% of grade and then into nothing at 5% rounding. When
+that happens the Results tab and the summary PDF now say so, with your own
+numbers, and name the two settings that change it.
