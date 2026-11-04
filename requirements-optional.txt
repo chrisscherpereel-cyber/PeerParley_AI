@@ -12,9 +12,10 @@
 # to requirements.txt, since that is the only file the deploy installs.
 
 # ---- Convenience in the app ---------------------------------------------- #
-# Renders a PDF inside the app so you can look at a report without
-# downloading it. Without it, the download buttons still work.
-PyMuPDF>=1.24,<2
+# NOTE: PyMuPDF used to live here. It is now in requirements.txt, because the
+# on-screen report previews are offered to every user and Streamlit Community
+# Cloud installs only that file. Do not move it back.
+#
 # A formatting toolbar for the email body. Without it you get a plain text box
 # that accepts the same HTML.
 streamlit-quill>=0.0.3,<1

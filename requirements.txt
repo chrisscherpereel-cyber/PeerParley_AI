@@ -11,10 +11,9 @@
 # *fresh* install months from now and breaks it for a new user who changed
 # nothing. Raise them deliberately, after running the tests.
 #
-# Optional extras — the AI writer, Dropbox or pCloud storage, in-app PDF
-# previews, the rich email editor — live in requirements-optional.txt. The app
-# runs without any of them and says which package is missing if you pick a
-# feature that needs one.
+# Optional extras — the AI writer, the rich email editor — live in
+# requirements-optional.txt. The app runs without any of them and says which
+# package is missing if you pick a feature that needs one.
 
 streamlit>=1.36,<2
 pandas>=2.2,<4
@@ -31,6 +30,13 @@ requests>=2.32,<3           # talking to your storage provider
 # working. pCloud needs nothing beyond requests, which is already above.
 msal>=1.28,<2          # Microsoft 365 / OneDrive / SharePoint, and Graph email
 dropbox>=11.36,<13     # Dropbox
+
+# Draws a report on screen, page by page, for the "Preview … on screen" boxes
+# in Results. Not optional for the same reason as the backends above: the app
+# offers those boxes to everybody, Streamlit Community Cloud installs only
+# this file, and a browser will not display a PDF in an iframe — so without
+# this package every hosted deployment loses the previews it advertises.
+PyMuPDF>=1.24,<2
 
 # Backs off and retries an AI request that was rate-limited or timed out.
 # Small, pure Python; without it a single rate limit becomes a failed draft.

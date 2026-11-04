@@ -1,5 +1,84 @@
 # Changelog
 
+## 2.15.0 — results and reports, audited
+
+Reported: *"provide explanations for each column of the output. The individual
+score, grade change, performance, and self-eval and agreement scores seem to be
+the same for everyone. I can't preview the instructor report on screen (I get
+the errors). Confidential feedback is empty."*
+
+Four defects. Each was reproduced before it was touched, and the two that look
+like three are one.
+
+**The preview error and the empty confidential report were the same bug.** The
+on-screen preview rasterises a report with PyMuPDF and, failing that, offers a
+download button instead. That button had no `key`, so Streamlit derived its id
+from its label and arguments — identical for every call. The instructor summary
+and the confidential report sit on the same page, so the second call raised a
+duplicate-id error *while the page was being drawn*: the summary preview
+appeared, and everything below it, the confidential report included, never
+rendered at all. It only showed where PyMuPDF was missing — which was every
+Streamlit Community Cloud deployment, because PyMuPDF was listed in
+`requirements-optional.txt` and Cloud installs only `requirements.txt`. Both
+halves are fixed: every preview now passes its own key, and PyMuPDF is a core
+requirement for the same reason the storage backends are. An empty confidential
+report also now says *why* it is empty — nobody used the box, or the survey
+never asked — instead of being a blank sheet, and the page says how many notes
+there are before you open anything.
+
+**Agreement (A) had four values, cut against the wrong thing.** It was fixed
+bands — 1.00 / 0.75 / 0.50 / 0.25 at 10%, 20% and 30% of an even share — so
+forty students could only ever land on four numbers, and because A multiplies
+the adjustment, the multiplier, individual score and grade change inherited the
+same coarseness. Worse, the cuts measured rater spread against a *scale* rather
+than against normal: four teammates splitting $100 and differing by five dollars
+is ordinary disagreement, yet it put the student past the 20% cut, and a section
+with realistic rater noise came out at A = 0.25 almost across the board. A is
+now continuous and measured against the median spread of the section it is in,
+with a floor of 0.50 — so it means "your evaluators agreed less than evaluators
+here usually do". **This moves grades**; `GRADING.md` §3 has the arithmetic.
+
+**The default rounding step is 1%, not 5%.** A real section produces adjustments
+in the ±2–8% range, and a 5-point grid flattens all of them onto {−5, 0, +5}.
+Measured on a simulated section: ten students, three distinct grades, half of
+them at exactly the team score — "the same for everyone", with nothing wrong
+with the data. At 1% the same section gives eight. No adjustment changed size;
+only the grid it is reported on. 5% is still selectable.
+
+**Self-eval? asked the wrong question.** It reported "did this student submit
+anything at all", which is Yes for every student in the table. It now reports
+whether they rated *themselves* — the ratings their report shows beside their
+peers'.
+
+**A flat column now says which kind of flat it is.** The commonest cause is that
+the measure the adjustment is computed from was never collected, and the old
+explanation answered that case with "the furthest anyone sat from their team's
+average was 0%, so at sensitivity 0.5 …" — blaming the settings for missing
+data. The three cases are now distinguished: the survey did not ask the
+question (with the switch to turn on), every rater really did split evenly, or
+the settings are conservative. Above the table, any column that is identical for
+every student is named, with what makes a column go flat.
+
+**Every column is explained, once.** One glossary in `grading.py` feeds three
+places: hover text on each heading in the results table, a "What does each
+column mean?" panel under it, and a full legend page on the instructor summary
+PDF. The PDF's seven abbreviated legend lines had drifted out of step with the
+table above them and said nothing about the score, the multiplier or the
+self-evaluation.
+
+Two things turned up while auditing and are fixed with it: the summary PDF never
+printed the **individual score** — the one figure an instructor transcribes —
+and its last column started 9.4 inches into a 9.5-inch text area, so the
+performance label printed off the edge of the sheet. A new **Peer Factor**
+column shows the number every adjustment is actually computed from, which until
+now was the one figure not in the table, leaving the multiplier impossible to
+check against anything.
+
+30 new tests (293 total), plus a driver that renders the real Results tab with
+both preview boxes ticked, twice — once with PyMuPDF and once without — because
+the failure was in the page, not in the data, and a test of the PDF bytes passed
+throughout.
+
 ## 2.14.2 — the spinner that never stopped
 
 Reported: *"all that I am getting is the app spinner when I try to run the

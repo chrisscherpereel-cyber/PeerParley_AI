@@ -32,19 +32,43 @@ def _detect_width_kwargs() -> dict:
 FULL_WIDTH = _detect_width_kwargs()
 
 
-def render_pdf(pdf_bytes: bytes) -> None:
-    """Inline PDF preview. Tries PyMuPDF page images (iframes are blocked by
-    browsers); falls back to a download button."""
+def render_pdf(pdf_bytes: bytes, key: str = "pdf", label: str = "") -> None:
+    """Show a PDF on screen, page by page.
+
+    Browsers block PDFs in an iframe, so the pages are rasterised with PyMuPDF
+    and shown as images. Without that package there is no inline preview, and
+    the fallback is a download button.
+
+    `key` must be unique on the page. It used to be absent, and the fallback
+    button therefore had an auto-generated id derived from its label and
+    arguments — identical for every call. Two previews on one page (the
+    instructor summary and the confidential report sit together) collided, and
+    Streamlit's duplicate-id error is raised *while the page is being drawn*,
+    so everything after the first preview — including the confidential report —
+    simply never appeared. The bug only showed where PyMuPDF was missing, which
+    is every Streamlit Community Cloud deployment, because the package used to
+    be listed in requirements-optional.txt.
+    """
     try:
         import fitz  # PyMuPDF
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page in doc:
-            pix = page.get_pixmap(dpi=120)
-            st.image(pix.tobytes("png"), **FULL_WIDTH)
+    except Exception:  # noqa: BLE001
+        st.info("Showing a PDF inside the app needs the **PyMuPDF** package "
+                "(`pip install PyMuPDF`, or add `PyMuPDF` to requirements.txt "
+                "on Streamlit Cloud). The report itself is complete — download "
+                "it below.", icon="📄")
+        st.download_button(f"⬇ Download {label or 'PDF'}", pdf_bytes,
+                           f"{key}.pdf", "application/pdf", key=f"dl_{key}")
         return
-    except Exception:
-        pass
-    st.download_button("⬇ Download PDF", pdf_bytes, "preview.pdf", "application/pdf")
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for page in doc:
+                pix = page.get_pixmap(dpi=120)
+                st.image(pix.tobytes("png"), **FULL_WIDTH)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"That report could not be drawn on screen ({exc}). "
+                   "Downloading it works regardless.", icon="⚠️")
+        st.download_button(f"⬇ Download {label or 'PDF'}", pdf_bytes,
+                           f"{key}.pdf", "application/pdf", key=f"dl_{key}")
 
 
 def student_ctx(m: StudentResult, course: str, eval_no: str) -> Dict[str, str]:

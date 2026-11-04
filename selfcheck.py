@@ -49,6 +49,12 @@ def heading(text: str) -> None:
 # --------------------------------------------------------------------------- #
 MIN_PYTHON = (3, 10)
 
+# Everything declared in requirements.txt. Kept in step with that file by
+# `test_selfcheck_requires_everything_requirements_txt_declares` — the two
+# lists drifted once already: msal, dropbox and PyMuPDF were reported here as
+# optional long after they became core requirements, so an install missing one
+# was told everything was fine and then failed at sign-in, or silently lost the
+# report previews.
 REQUIRED = [
     ("streamlit", "the app itself"),
     ("pandas", "reading contact lists and exports"),
@@ -57,12 +63,12 @@ REQUIRED = [
     ("reportlab", "the PDF reports"),
     ("cryptography", "encrypting student data"),
     ("requests", "talking to your storage provider"),
-]
-OPTIONAL = [
-    ("fitz", "PyMuPDF — previewing a PDF inside the app"),
     ("msal", "Microsoft 365 storage and email"),
     ("dropbox", "Dropbox storage"),
+    ("fitz", "PyMuPDF — showing a report on screen without downloading it"),
     ("tenacity", "retrying an AI request that was rate-limited"),
+]
+OPTIONAL = [
     ("openai", "OpenAI / xAI / OpenRouter / a local model, for the AI writer"),
     ("anthropic", "Claude, for the AI writer"),
     ("google.genai", "Gemini, for the AI writer"),

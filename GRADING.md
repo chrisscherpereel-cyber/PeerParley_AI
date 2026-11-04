@@ -65,13 +65,34 @@ bonus; one averaging $20 → 50% → a deduction; one at $40 → 100% → no cha
 
 ## 3. Agreement weight A (evaluator consensus)
 ```
-A = 1.00 if SD(received)/expected_share ≤ 10%
-    0.75 if ≤ 20%
-    0.50 if ≤ 30%
-    0.25 otherwise         (expected_share = 100/(n−1))
+spread_i   = SD(received_i) / expected_share        # expected_share = 100/(n−1)
+reference  = median(spread) over the whole section  # ≥ 0.05; 0.15 if too small
+excess     = spread_i / reference − 1
+A          = 1.00                       when excess ≤ 0
+             0.50 … 1.00, linearly,     as excess runs 0 → 1.5
+             0.50                       at or beyond that
 ```
-If evaluators strongly **disagree** about a student, the signal is noisier, so their
-adjustment is softened. (`A = 1` with fewer than two data points.)
+If a student's evaluators **disagree with each other more than evaluators in this
+section usually do**, the signal is noisier, so their adjustment is softened.
+`A = 1` with fewer than two data points.
+
+**Changed in 2.15.0, and it moves grades.** A used to be four fixed bands —
+1.00 / 0.75 / 0.50 / 0.25 cut at 10%, 20% and 30% of an even share — and two
+things were wrong with that. Forty students could only ever land on four values,
+and because A multiplies the adjustment, the multiplier, individual score and
+grade change inherited the same coarseness. Worse, the cuts measured spread
+against a *scale* rather than against normal: four teammates splitting $100 and
+differing by five dollars is ordinary disagreement, but it put the student past
+the 20% cut, and a section with normal rater noise came out at A = 0.25 almost
+across the board — which, stacked with sensitivity and Q and then rounded, took
+every grade change to zero. Measuring against the section's own median spread is
+what makes A mean "your raters agreed less than is usual *here*". The floor is
+0.50 rather than 0.25 because A is one of three factors already shrinking the
+adjustment.
+
+A is therefore **relative**: one student's A depends on how the rest of the
+section was rated, in the same way the peer factor already depends on the team
+average. The number is shown in the results table and on the summary PDF.
 
 ## 4. Comment support Q (do the words back up the dollars?)
 From `comments.py`, a 0–1 score for the comments *written about* a student, based on
@@ -135,7 +156,12 @@ rounded delta is now applied: the report and the score are the same number, and
 the cap is re-applied afterwards so nothing can exceed the configured limits.
 One consequence is worth planning around — in 5% steps any adjustment smaller
 than ±2.5% becomes no change at all, which in a typical section is most
-students. Use 1% steps if you want smaller differences to reach the gradebook.
+students. **This is why the default step is 1% from 2.15.0 onwards.** Measured
+on a simulated section with ordinary rater noise, 5% steps flattened ten
+students onto three distinct grades with half of them at exactly the team score,
+and 1% steps gave eight. Nothing about the size of anyone's adjustment changed;
+only the grid it is reported on. Set 5% on the Grading rules tab if you prefer
+round numbers and accept that small differences disappear.
 
 **Correcting for easy and harsh graders stays in dollars.** The old
 implementation z-scored each evaluator and then used the standard score where a

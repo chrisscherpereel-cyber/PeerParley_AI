@@ -48,6 +48,8 @@ from peerparley.grading import (
     adjustment_note as grading_note,
     data_warnings as grading_warnings,
     results_to_frame,
+    COLUMN_HELP,
+    constant_columns,
 )
 from peerparley import pdfgen
 from peerparley import email_delivery as mail
@@ -596,11 +598,17 @@ deduction are capped **separately** — by default a top student can rise at mos
 **+5%**, while a low student can fall at most **−50%**. Two optional weights can
 only *shrink* the adjustment, never flip its sign:
 
-- **Agreement (A)** — if evaluators strongly *disagree* about a student, their
-  adjustment is softened (they got mixed signals).
+- **Agreement (A)** — if a student's evaluators disagreed with each other *more
+  than evaluators in this section usually do*, their adjustment is softened:
+  mixed signals carry less weight. 1.00 means normal agreement or better, and it
+  never drops below 0.50.
 - **Comment support (Q)** — if the written comments about a student don't back up
   the dollars, the adjustment is softened. With no comments, Q is neutral (no
   effect).
+
+Adjustments are reported on the rounding step you choose on this tab. The
+default is **1%**; 5% steps turn any adjustment under ±2.5% into no change at
+all, which in a typical section is most students.
 
 **4. Feedback points** — each student also earns points (default up to **5**) for
 the **quality of the feedback *they* wrote** about teammates — length, specifics,
@@ -1780,7 +1788,38 @@ with tabs[3]:
             _flat = grading_note(teams, settings)
             if _flat:
                 st.info(_flat, icon="📐")
-            st.dataframe(frame, **FULL_WIDTH, height=380)
+            # Hover help on every heading, from the one glossary in grading.py.
+            # Streamlit only grew `column_config` in 1.23 and the `help` field
+            # after that, so a version that does not understand it must get a
+            # plain dataframe rather than a traceback.
+            try:
+                _cc = {c: st.column_config.Column(c, help=COLUMN_HELP[c])
+                       for c in frame.columns if c in COLUMN_HELP}
+                st.dataframe(frame, **FULL_WIDTH, height=380, column_config=_cc)
+            except Exception:  # noqa: BLE001
+                st.dataframe(frame, **FULL_WIDTH, height=380)
+            # "These numbers are the same for everyone" was reported as a bug
+            # three times, and was a different thing each time. Name the
+            # columns that are constant and say what makes a column constant,
+            # rather than leaving the instructor to guess which it is.
+            _const = constant_columns(frame)
+            if _const and len(frame) > 1:
+                st.caption(
+                    "**The same for every student in this section:** "
+                    + ", ".join(f"*{c}*" for c in _const)
+                    + ". That is worth a look — a column goes flat when the "
+                      "survey never asked the question, when the rounding step "
+                      "on the Grading rules tab is wider than the differences "
+                      "between students, or when the students genuinely were "
+                      "indistinguishable on it. The column descriptions below "
+                      "say what each one is built from.")
+            with st.expander("What does each column mean?"):
+                st.caption("Hover any column heading in the table for the same "
+                           "text. It is also printed on the last page of the "
+                           "instructor summary PDF.")
+                for _c in frame.columns:
+                    if _c in COLUMN_HELP:
+                        st.markdown(f"**{_c}** — {COLUMN_HELP[_c]}")
             st.download_button("⬇ Results CSV", frame.to_csv(index=False),
                                "peerparley_results.csv", "text/csv")
 
@@ -1832,6 +1871,22 @@ with tabs[3]:
                 "⬇ Confidential feedback (PDF)", _conf_pdf,
                 f"peerparley_{course or 'section'}_eval{eval_no}_confidential.pdf",
                 "application/pdf")
+            # "The confidential feedback is empty" has two very different
+            # causes — nobody wrote one, or the box was never asked — and a
+            # blank report cannot tell them apart. So count them here.
+            _n_conf = sum(1 for t in teams for m in t.members
+                          if any(x.strip() for x in m.confidential_comments))
+            if _n_conf:
+                r2.caption(f"{_n_conf} student(s) wrote a confidential note.")
+            else:
+                _asked = bool((S.get("survey_cfg") or {}).get("ask_confidential",
+                                                              True))
+                r2.caption(
+                    "No confidential notes — nobody used that box."
+                    if _asked else
+                    "No confidential notes: this survey does not ask for one "
+                    "(see “Confidential note to the instructor” in Survey "
+                    "design).")
             # Rendering a preview rasterises every page and pushes well over a
             # megabyte of images to the browser; inside an expander it happened
             # whether or not the expander was open. Now it is opt-in.
@@ -1840,9 +1895,11 @@ with tabs[3]:
                            help="Only needed if you want to look without "
                                 "downloading. The PDFs above are the same thing."):
                 with st.expander("Instructor summary", expanded=True):
-                    _render_pdf(_summary_pdf)
+                    _render_pdf(_summary_pdf, key="instructor_summary",
+                                label="instructor summary (PDF)")
                 with st.expander("Confidential feedback", expanded=False):
-                    _render_pdf(_conf_pdf)
+                    _render_pdf(_conf_pdf, key="instructor_confidential",
+                                label="confidential feedback (PDF)")
 
             st.markdown("##### Student & team PDFs")
             colA, colB = st.columns(2)
@@ -1892,7 +1949,8 @@ with tabs[3]:
                         narrative=narratives.get(m.key, ""))
                     if narratives.get(m.key):
                         st.caption("This preview includes the approved AI narrative.")
-                    _render_pdf(pdf)
+                    _render_pdf(pdf, key="student_preview",
+                                label=f"{m.name}'s report (PDF)")
 
 # =========================================================================== #
 # TAB 5 — Email

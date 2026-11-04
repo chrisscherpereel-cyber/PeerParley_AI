@@ -1,6 +1,6 @@
 # Release checklist
 
-What was validated before 2.10.0, and what to re-run before any future
+What was validated before 2.15.0, and what to re-run before any future
 release. Everything here is a command, so the answer is never a matter of
 opinion.
 
@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 263 passed
+python3 -m pytest tests/ -q          # expect: 293 passed
 python3 qa_regression.py             # expect: 93/93 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
@@ -20,6 +20,8 @@ python3 selfcheck.py                 # expect: exit 0 on a configured install
 | `tests/test_first_run.py` | a brand-new installation: the setup screen, the file it writes, signing in with the chosen password, the dependency bounds, and that no secret or student file is in the repository |
 | `tests/test_delivery_and_clock.py` | the delivery defaults, that the review option is offered on every method and that the auto-send pack's review mode writes drafts instead of sending, the detected app address, and the scheduling clock |
 | `qa_regression.py` | the real app driven headless through Streamlit's test runner: grading, PDFs, email packs, the AI review panel, the setup gate |
+| `tests/test_results_reports.py` | the results table and the reports: that every column has an explanation and no explanation outlives its column, that the grade columns actually differentiate students on default settings, that a flat column names its own cause, and that three report previews on one page do not collide |
+| `tests/_results_tab_app.py` | the real Results tab with both preview boxes ticked, run twice — with PyMuPDF and without, which is how a Streamlit Cloud deployment is configured. The duplicate-widget-id bug was in the *page*: the PDF bytes were always correct |
 | `tests/_rerun_cost.py` | what one rerun costs in storage round trips, with a 40-student section loaded — the number that decides whether the app feels fast on a cloud store, and the one a local timing cannot see |
 
 ## 1a. Performance, measured rather than felt
@@ -79,10 +81,15 @@ a file-write on a hosted server (where the file would not survive a restart).
 
 ## 5. Known limits, stated rather than hidden
 
-- **A storage backend's package must be in `requirements.txt`,** not in
-  `requirements-optional.txt`: Streamlit Community Cloud installs only the
-  first file, so an optional backend package means a deployment that cannot
-  open its own storage. A test enforces this; do not "tidy" them back out.
+- **A package any user-facing feature needs must be in `requirements.txt`,**
+  not in `requirements-optional.txt`: Streamlit Community Cloud installs only
+  the first file. An optional *storage* package meant a deployment that could
+  not open its own storage (2.10.0); an optional **PyMuPDF** meant every hosted
+  deployment silently lost the on-screen report previews it offers, and fell
+  back to a code path with a duplicate-widget-id bug in it that took the whole
+  Results tab down (2.15.0). Tests enforce both; do not "tidy" them back out.
+  `requirements-optional.txt` is for features the app *offers to install* — the
+  AI provider SDKs, the rich email editor — not for features it just offers.
 - **`local` storage is for trying it out.** The files are encrypted, but they
   sit beside the app and a hosted restart can wipe them. Real student records
   belong in Microsoft 365, Dropbox or pCloud (`DEPLOYMENT.md`).

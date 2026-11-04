@@ -337,10 +337,18 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
                  + (f"  ·  Eval {eval_no}" if eval_no else ""))
     y -= 22
 
-    # column layout (inches from left margin)
-    cols = [("Name", 0.0), ("TmPl", 3.2), ("Qty", 3.7), ("Qual", 4.2), ("Effect", 4.7),
-            ("Pay", 5.4), ("Ratio", 5.9), ("A", 6.5), ("Q", 6.9), ("Resp.Pts", 7.3),
-            ("Mult", 8.1), ("Grade Δ", 8.7), ("Perf", 9.4)]
+    # Column layout, in inches from the left margin. Landscape letter is 11"
+    # wide and MARGIN is 0.75" each side, so the last column has to start by
+    # 8.7" to have room for "Expected" — the old layout put Perf at 9.4" and
+    # printed it off the edge of the page.
+    #
+    # Score was missing entirely: the table gave the multiplier and the signed
+    # delta but never the number that goes in the gradebook, which is the one
+    # figure an instructor transcribes.
+    cols = [("Name", 0.0), ("TmPl", 2.3), ("Qty", 2.75), ("Qual", 3.2),
+            ("Effect", 3.65), ("Pay", 4.2), ("Ratio", 4.75), ("A", 5.3),
+            ("Q", 5.7), ("Resp", 6.1), ("Mult", 6.6), ("Grade Δ", 7.25),
+            ("Score", 7.9), ("Perf", 8.7)]
 
     def col_header():
         c.setFont("Helvetica-Bold", 8); c.setFillColor(B.GREY)
@@ -362,10 +370,13 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
         col_header()
         for m in t.members:
             c.setFont("Helvetica", 8); c.setFillColor(B.NAVY)
-            vals = [m.name[:30], m.team_player or "—", m.quantity or "—", m.quality or "—",
-                    m.effect or "—", "" if _is_nan(m.pay_grade) else f"{m.pay_grade:.0%}",
-                    f"{m.peer_ratio:g}", f"{m.A:g}", f"{m.Q:g}", str(m.response_points),
-                    f"{m.multiplier:g}", "", m.performance[:9]]
+            vals = [m.name[:28], m.team_player or "—", m.quantity or "—",
+                    m.quality or "—", m.effect or "—",
+                    "—" if _is_nan(m.pay_grade) else f"{m.pay_grade:.0%}",
+                    f"{m.peer_ratio:.3f}", f"{m.A:.2f}",
+                    "—" if _is_nan(m.Q) else f"{m.Q:.2f}",
+                    str(m.response_points), f"{m.multiplier:.4f}", "",
+                    f"{m.individual_score:g}", m.performance[:9]]
             for (label, dx), v in zip(cols, vals):
                 if label == "Grade Δ":
                     c.setFillColor(B.grade_color(m.signed_pct))
@@ -379,35 +390,63 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
                 _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
         yy[0] -= 10
 
-    if yy[0] < MARGIN + 1.6 * inch:
-        _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
-    c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 9)
-    c.drawString(MARGIN, yy[0], "What each column means"); yy[0] -= 13
-    legend = [
-        "TmPl / Qty / Qual / Effect = letter grades from the 4-statement rating matrix.",
-        "Pay = average received allocation vs the team average.  Ratio = received vs fair share.",
-        "A = evaluator agreement weight (lower when evaluators disagreed about this student).",
-        "Q = average quality of the comments written ABOUT this student; it scales the adjustment.",
-        "Resp.Pts = average quality of the feedback this student wrote, across their teammates.",
-        "Mult = final grade multiplier.  Grade Δ = signed adjustment vs the team score.",
-        "Perf = performance from the forced ranking (High / Adequate / Low).",
-    ]
-    for ln in legend:
-        c.setFont("Helvetica", 8); c.setFillColor(B.GREY)
-        c.drawString(MARGIN, yy[0], "• " + ln); yy[0] -= 11
+    # ---- what every column means ----
+    # Its own page, and written from grading.COLUMN_HELP rather than a second
+    # copy here. There used to be seven abbreviated lines that had drifted out
+    # of step with the table above them, and nothing at all about the Score,
+    # the Multiplier or the self-evaluation. This PDF is what gets filed,
+    # forwarded and quoted back by a student asking how a number was reached,
+    # so the explanation has to travel with it.
+    from .grading import COLUMN_HELP, adjustment_note
 
-    # A section where nothing moved reads as a broken report. Explain it here
-    # too: this PDF is what gets filed and forwarded, often without the app
-    # open beside it.
-    from .grading import adjustment_note
+    _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
+    c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 13)
+    c.drawString(MARGIN, yy[0], "What each column means"); yy[0] -= 18
+    c.setFont("Helvetica", 9); c.setFillColor(B.GREY)
+    c.drawString(MARGIN, yy[0], "The same text appears when you hover a column "
+                                "heading in the Results tab."); yy[0] -= 8
+    c.setStrokeColor(B.GREEN_LIGHT); c.setLineWidth(1.5)
+    c.line(MARGIN, yy[0], pw - MARGIN, yy[0]); yy[0] -= 18
+
+    # The table's headings are abbreviated to fit; map each to the full name.
+    ABBREV = [
+        ("TmPl / Qty / Qual / Effect", "Team Player"),   # one entry, four cols
+        ("Pay", "Pay Grade"), ("Ratio", "Peer Factor"),
+        ("A", "A (agreement)"), ("Q", "Q (support)"),
+        ("Resp", "Response Pts"), ("Mult", "Multiplier"),
+        ("Grade Δ", "Grade Δ"), ("Score", "Individual Score"),
+        ("Perf", "Performance"),
+    ]
+    for short, full in ABBREV:
+        if yy[0] < MARGIN + 0.9 * inch:
+            _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
+        text = COLUMN_HELP.get(full, "")
+        if short.startswith("TmPl"):
+            text = ("Letter grades from the four statements of the rating "
+                    "matrix: Team Player, Quantity of work, Quality of work, "
+                    "and Effect on the team. Each is the peers' average answer "
+                    "on the 7-point scale. A dash means no rating matrix was "
+                    "collected.")
+        c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 9)
+        c.drawString(MARGIN, yy[0], short); yy[0] -= 11
+        yy[0] = _wrap(c, text, MARGIN + 0.15 * inch, yy[0],
+                      pw - 2 * MARGIN - 0.15 * inch, "Helvetica", 8.5, 11,
+                      B.GREY)
+        yy[0] -= 7
+
+    # A section where nothing moved reads as a broken report. Explain that here
+    # too, for the same reason.
     _flat = adjustment_note(teams)
     if _flat:
+        if yy[0] < MARGIN + 1.2 * inch:
+            _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
         yy[0] -= 6
-        c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 8)
-        c.drawString(MARGIN, yy[0], "Why every Grade ∆ is 0%"); yy[0] -= 11
-        c.setFont("Helvetica", 8); c.setFillColor(B.GREY)
-        yy[0] = _wrap(c, _flat, MARGIN, yy[0], pw - 2 * MARGIN,
-                      "Helvetica", 8, 11, B.GREY)
+        c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 9)
+        c.drawString(MARGIN, yy[0], "Why no grade moved from the team score")
+        yy[0] -= 12
+        # The note is written for the screen and carries markdown emphasis.
+        yy[0] = _wrap(c, _flat.replace("**", ""), MARGIN, yy[0],
+                      pw - 2 * MARGIN, "Helvetica", 8.5, 11, B.GREY)
 
     # ---- confidential comments to the instructor ----
     conf_rows = [(t.team, m.name, [x for x in m.confidential_comments if x.strip()])
@@ -453,6 +492,24 @@ def build_confidential_pdf(teams: List[TeamResult], course: str = "",
     c.setFillColor(B.RED); c.setFont("Helvetica-Bold", 9)
     c.drawString(MARGIN, y, "INSTRUCTOR ONLY — do not distribute to students. Each note appears under its author.")
     y -= 24
+
+    # An empty report used to be a blank sheet, which reads as a broken export
+    # rather than as "nobody wrote anything". Say which it is.
+    if not any(x.strip() for t in teams for m in t.members
+               for x in m.confidential_comments):
+        y = _wrap(c, "No student wrote a confidential note for this evaluation.",
+                  MARGIN, y, PAGE_W - 2 * MARGIN, "Helvetica-Bold", 10, 14, B.NAVY)
+        y -= 6
+        _wrap(c, "This report collects the free-text box headed “Confidential "
+                 "note to the instructor” on the student form. It is empty "
+                 "either because no student used that box, or because the box "
+                 "was switched off for this survey — see “Ask for a "
+                 "confidential note” in the survey design tab.",
+              MARGIN, y, PAGE_W - 2 * MARGIN, "Helvetica", 9.5, 13, B.GREY)
+        _footer(c, "Confidential instructor feedback.")
+        c.showPage(); c.save()
+        return buf.getvalue()
+
     for t in teams:
         for m in t.members:
             conf = [x for x in m.confidential_comments if x.strip()]

@@ -77,7 +77,14 @@ class GradeSettings:
     min_multiplier: float = 0.50    # max 50% DECREASE (deduction cap)
     max_multiplier: float = 1.05    # max  5% INCREASE (bonus cap)
     max_comment_points: int = 10
-    rounding_step: int = 5          # 1 or 5 (percent)
+    # 1 or 5 (percent). The default used to be 5, and that single setting was
+    # what made the results tab look broken: a normal section produces grade
+    # adjustments in the ±2% to ±8% range, and a 5-point grid flattens all of
+    # them onto {-5, 0, +5}. Ten students came out with three distinct grades
+    # and half of them at exactly the team score — "the same for everyone",
+    # with nothing actually wrong with the data. 1% steps report what was
+    # computed; 5% is still available for instructors who want round numbers.
+    rounding_step: int = 1          # 1 or 5 (percent)
     rounding_mode: str = "nearest"  # nearest | up | down
     performance_method: str = "allocation_ratio"  # allocation_ratio|rank_linear|rank_one_mean
     performance_band: float = 0.08  # +-8%
@@ -88,19 +95,106 @@ class GradeSettings:
     normalize_raters: bool = False   # z-score each evaluator (corrects for leniency)
 
 
-def agreement_weight(received: List[float], expected_share: float) -> float:
+# --------------------------------------------------------------------------- #
+# A — how much did this student's raters agree with each other?
+# --------------------------------------------------------------------------- #
+# A dampens the grade adjustment when the peers who evaluated a student did not
+# agree about them: weak evidence should move a grade less than strong evidence.
+#
+# It used to be four fixed bands — 1.00 / 0.75 / 0.50 / 0.25 — cut at 10%, 20%
+# and 30% of an even share. Two things were wrong with that.
+#
+# First the resolution. Forty students could only ever land on four values, and
+# because A multiplies the adjustment, the three numbers downstream of it
+# (multiplier, individual score, grade change) inherited the same coarseness.
+# Measured on a section where raters disagreed a normal amount, A came out 0.25
+# for almost everybody and every grade change rounded to zero.
+#
+# Second, and worse, the bands measured spread against a *scale* rather than
+# against normal. Four teammates splitting $100 four ways and differing by five
+# dollars is ordinary disagreement, not a reason to distrust them — but it put
+# the student past the 20% cut. The threshold for "my raters disagree" has to
+# come from how much raters in this section actually disagree.
+#
+# So A is now continuous and measured against the median spread of the section
+# it is in: 1.00 when a student's raters are no more split than is typical here,
+# sliding down to AGREEMENT_FLOOR when they are AGREEMENT_SPAN times more split
+# than typical. The floor is 0.50 rather than 0.25 because A is one of three
+# factors already shrinking the adjustment — stacking three halvings and then
+# rounding is how a whole section ends up at no change at all.
+AGREEMENT_FLOOR = 0.50
+AGREEMENT_SPAN = 1.50
+# Used when the section is too small to have a median of its own (fewer than
+# four students with more than one rating). 0.15 of an even share is the median
+# measured on simulated 8-team sections with realistic rater noise.
+AGREEMENT_TYPICAL = 0.15
+# A section where every rater typed exactly the same numbers would have a
+# median spread near zero, and dividing by it would turn a one-dollar
+# difference into a maximum penalty. Below this, use the typical value.
+AGREEMENT_MIN_REFERENCE = 0.05
+
+
+def agreement_weight(received: List[float], expected_share: float,
+                     reference: float = 0.0) -> float:
+    """How much weight do this student's peer ratings deserve? 0.5 … 1.0.
+
+    `reference` is the section's typical spread, as a fraction of an even
+    share, from `dispersion_reference()`. Left at 0 it falls back to
+    AGREEMENT_TYPICAL, so calling this with two arguments still works.
+    """
     vals = [v for v in received if v == v]  # drop NaN
     if len(vals) < 2 or expected_share <= 0:
         return 1.0
-    sd = float(np.std(vals, ddof=0))
-    frac = sd / expected_share
-    if frac <= 0.10:
-        return 1.00
-    if frac <= 0.20:
-        return 0.75
-    if frac <= 0.30:
-        return 0.50
-    return 0.25
+    frac = float(np.std(vals, ddof=0)) / expected_share
+    ref = reference if reference > 0 else AGREEMENT_TYPICAL
+    ref = max(ref, AGREEMENT_MIN_REFERENCE)
+    excess = frac / ref - 1.0
+    if excess <= 0:
+        return 1.0
+    shrink = min(excess / AGREEMENT_SPAN, 1.0)
+    return round(AGREEMENT_FLOOR + (1.0 - AGREEMENT_FLOOR) * (1.0 - shrink), 3)
+
+
+def dispersion_reference(long_df: pd.DataFrame) -> float:
+    """The median rater spread in this section, as a fraction of an even share.
+
+    This is what makes A mean "your raters agreed less than is usual *in this
+    class*" rather than "your raters differed by more than ten dollars". It is
+    computed once per section, before any team is graded, so every student is
+    measured against the same yardstick.
+
+    Returns 0.0 when there is not enough data to form a median, and the caller
+    then falls back to AGREEMENT_TYPICAL.
+    """
+    if long_df is None or long_df.empty or "points" not in long_df.columns:
+        return 0.0
+    if not {"evaluatee_key", "evaluator_key"} <= set(long_df.columns):
+        return 0.0
+    # `compute` adds a "team" column (the evaluator's team, so a student on two
+    # teams is counted once). Called on raw long-format data — from a test, or
+    # from a caller wanting the number on its own — fall back to the column the
+    # intake paths write.
+    team_col = ("team" if "team" in long_df.columns
+                else "evaluator_team" if "evaluator_team" in long_df.columns
+                else "")
+    if not team_col:
+        return 0.0
+    fracs: List[float] = []
+    for team, tdf in long_df.groupby(team_col):
+        if not str(team).strip():
+            continue
+        keys = {k for k in set(tdf["evaluatee_key"]) | set(tdf["evaluator_key"])
+                if str(k).strip()}
+        share = 100.0 / (len(keys) - 1) if len(keys) > 1 else 100.0
+        if share <= 0:
+            continue
+        for _, grp in tdf.groupby("evaluatee_key"):
+            vals = [float(v) for v in grp["points"] if v == v]
+            if len(vals) > 1:
+                fracs.append(float(np.std(vals, ddof=0)) / share)
+    if len(fracs) < 4:
+        return 0.0
+    return float(np.median(fracs))
 
 
 def _round_pct(x: float, step: int, mode: str) -> float:
@@ -253,6 +347,9 @@ def compute(
         long_df["points"] = pd.to_numeric(long_df["points"], errors="coerce")
     has_ratings = all(f"r{d}" in long_df.columns for d in range(4))
     has_rank = "rank" in long_df.columns
+    # One yardstick for the whole section, so A compares students with each
+    # other rather than with a fixed number of dollars. See agreement_weight.
+    agreement_ref = dispersion_reference(long_df)
 
     for team, tdf in long_df.groupby("team"):
         if team == "":
@@ -440,7 +537,7 @@ def compute(
             rec = received.get(k, [])
             received_total = float(np.sum(rec)) if rec else 0.0
             ravg = received_avgs.get(k)
-            A = agreement_weight(rec, expected_share)
+            A = agreement_weight(rec, expected_share, agreement_ref)
             # Nobody evaluated this student at all: no dollars, no ratings, no
             # ranking. There is nothing to grade them on, so they keep the team
             # score and the instructor gets told who they are.
@@ -577,6 +674,69 @@ def compute(
     return results
 
 
+_SOURCE_LABEL = {
+    "allocation": ("the $100 allocation", "Allocate $100 among your teammates"),
+    "rating": ("the rating matrix", "Rating matrix — 4 statements"),
+    "ranking": ("the forced ranking", "Forced ranking — High / Adequate / Low"),
+    "combined": ("the $100 allocation and the rating matrix",
+                 "Allocate $100 among your teammates"),
+}
+
+
+def missing_adjustment_source(teams: List["TeamResult"],
+                              settings: Optional[GradeSettings] = None) -> str:
+    """"Nothing to compute the adjustment from", said plainly, or "".
+
+    Every grade adjustment is a deviation from the team average, measured on
+    one chosen peer measure (`settings.adjustment_source`). When that measure
+    is absent from the responses, every deviation is zero by construction —
+    which the results tab shows as five identical columns and no explanation.
+    This is the explanation.
+
+    Separated from `adjustment_note` because it is a different kind of answer:
+    not "your settings are conservative" but "this survey did not ask the
+    question", and the remedy is in the survey design, not the grading rules.
+    """
+    members = [m for t in teams for m in t.members]
+    if not members:
+        return ""
+    settings = settings or GradeSettings()
+    src = settings.adjustment_source
+    # peer_ratio is the normalized peer factor actually used. Exactly 1.0 for
+    # every student means no student deviated from their team's average on the
+    # chosen measure — either because nothing was collected, or because every
+    # rater really did split the work evenly.
+    if any(abs(m.peer_ratio - 1.0) > 1e-9 for m in members):
+        return ""
+    label, question = _SOURCE_LABEL.get(src, (src, src))
+    collected = any(m.pay_grade == m.pay_grade for m in members)  # not NaN
+    if src in ("allocation", "combined") and not collected:
+        return (
+            f"**No grade adjustment was possible: this evaluation did not "
+            f"collect {label}.** Grades are set from the deviation of each student's "
+            f"share from their team's average, so with no shares there is "
+            f"nothing to deviate from and every student keeps the team score. "
+            f"Switch on “{question}” in Survey design (or map that "
+            f"column when importing), or pick a different measure under "
+            f"“What drives the grade adjustment” on the Grading "
+            f"rules tab — the ratings and the forced ranking can both "
+            f"drive it instead.")
+    if src in ("rating", "ranking"):
+        return (
+            f"**No grade adjustment was possible: this evaluation has no "
+            f"usable data for {label}.** The grade adjustment is set from it, so with none "
+            f"collected every student keeps the team score. Switch on "
+            f"“{question}” in Survey design, or choose a different "
+            f"measure under “What drives the grade adjustment” on the "
+            f"Grading rules tab.")
+    return (
+        f"**Every student's share of {label} came out exactly at their team's "
+        f"average**, so no grade moved. That is a real result, not a missing "
+        f"one: it happens when every rater splits the points evenly. The "
+        f"dimension grades, performance labels and written feedback below are "
+        f"unaffected.")
+
+
 def adjustment_note(teams: List["TeamResult"],
                     settings: Optional[GradeSettings] = None) -> str:
     """Why is every grade adjustment zero? Said plainly, or "" when some moved.
@@ -590,11 +750,25 @@ def adjustment_note(teams: List["TeamResult"],
 
     So rather than leave the instructor to infer that, the arithmetic is stated
     with their own numbers, along with the two settings that change it.
+
+    But the arithmetic is only the answer when there *was* an input to scale.
+    The commonest cause of a flat section is that the measure the adjustment is
+    computed from was never collected — the survey did not ask for the $100
+    allocation, or the imported export has no column for it — and this used to
+    answer that case with "the furthest anyone sat from their team's average
+    was 0%, so at sensitivity 0.5 …", which blames the settings for missing
+    data. That case is now named first, because it is the one the instructor
+    can actually fix.
     """
     members = [m for t in teams for m in t.members]
     if not members or any(abs(m.signed_pct) > 1e-9 for m in members):
         return ""
     settings = settings or GradeSettings()
+
+    missing = missing_adjustment_source(teams, settings)
+    if missing:
+        return missing
+
     qs = [m.Q for m in members if m.Q == m.Q]
     spread = [m.pay_grade for m in members if m.pay_grade == m.pay_grade]
     mean_q = (sum(qs) / len(qs)) if qs else 1.0
@@ -701,6 +875,75 @@ def _pct(x) -> str:
     return f"{x:.0%}"
 
 
+# --------------------------------------------------------------------------- #
+# What every column means
+# --------------------------------------------------------------------------- #
+# Written once, used three times: the column tooltips in the results table, the
+# glossary under it, and the legend on the section-summary PDF. Keeping one
+# copy is the point — the PDF legend and the on-screen table had drifted apart,
+# and a column whose meaning you have to reverse-engineer from the source is a
+# column an instructor cannot defend to a student who asks.
+COLUMN_HELP: Dict[str, str] = {
+    "Team": "The team this student was evaluated within.",
+    "Name": "The student, as their teammates' responses spell it. A name that "
+            "appears twice with different spellings becomes two rows — the "
+            "warnings above the table say so when it happens.",
+    "Team Player": "Peers' average answer to the first rating statement, on "
+                   "the 7-point scale, shown as a letter grade. Blank means no "
+                   "rating matrix was collected.",
+    "Quantity": "Peers' average answer to the second rating statement — how "
+                "much work the student did — as a letter grade.",
+    "Quality": "Peers' average answer to the third rating statement — how good "
+               "that work was — as a letter grade.",
+    "Effect": "Peers' average answer to the fourth rating statement — the "
+              "effect the student had on the team — as a letter grade.",
+    "Pay Grade": "The student's share of the $100 their teammates allocated, "
+                 "as a percentage of an even share. 100% is an even share; "
+                 "125% means they were given a quarter more than even. Empty "
+                 "(a dash on the PDF) means no allocation was collected.",
+    "Peer Factor": "Pay Grade divided by the team's average, which is the "
+                   "number the grade adjustment is actually computed from. "
+                   "1.000 is exactly average. Which measure feeds it — the "
+                   "allocation, the ratings or the ranking — is set on the "
+                   "Grading rules tab.",
+    "A (agreement)": "How much the student's own raters agreed with each "
+                     "other, compared with how much raters in this section "
+                     "agreed on average. 1.00 means as much or more; lower "
+                     "means their raters were unusually split, so the "
+                     "adjustment is trusted less. Never below 0.50, and it "
+                     "only ever shrinks an adjustment — it cannot flip it.",
+    "Q (support)": "How well the written comments about this student support "
+                   "the numbers given for them, from 0 to 1, averaged over the "
+                   "comments they received. Like A, it only shrinks the "
+                   "adjustment. 1.00 for everyone means the survey collected "
+                   "no written feedback, so this dampener is switched off.",
+    "Response Pts": "What the student earned for the feedback THEY wrote about "
+                    "their teammates, out of the maximum on the Grading rules "
+                    "tab. Averaged over every teammate they were asked about, "
+                    "so skipping three and writing one good comment does not "
+                    "score full marks. This is the only column about their own "
+                    "effort as an evaluator.",
+    "Multiplier": "What the team score is multiplied by to get this student's "
+                  "individual score. 1.0000 is no change.",
+    "Individual Score": "The student's score: the team score times the "
+                        "multiplier, after rounding. This is the number that "
+                        "goes in the gradebook.",
+    "Grade Δ": "Individual Score minus the team score, in points — the same "
+               "information as the multiplier, in the units of the gradebook. "
+               "Rounded to the step set on the Grading rules tab, and the "
+               "rounded figure is what is applied, so the two always agree.",
+    "Performance": "High / Adequate / Expected / Low, from the forced ranking "
+                   "when the survey collected one, otherwise from how far the "
+                   "student sat from their team's average. “No data” "
+                   "means no teammate evaluated them at all.",
+    "Self-eval?": "Did this student complete the self-evaluation — the ratings "
+                  "of themselves that appear beside their peers' in their "
+                  "report. “No” means they submitted an evaluation "
+                  "of their teammates but left their own ratings blank, or the "
+                  "survey did not ask for them.",
+}
+
+
 def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
     rows = []
     for t in teams:
@@ -713,6 +956,11 @@ def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
                 "Quality": m.quality,
                 "Effect": m.effect,
                 "Pay Grade": _pct(m.pay_grade),
+                # The number the adjustment is computed from was the one column
+                # NOT in this table, which made the three columns downstream of
+                # it impossible to check: an instructor could see the
+                # multiplier but not what produced it.
+                "Peer Factor": round(m.peer_ratio, 3),
                 "A (agreement)": m.A,
                 "Q (support)": m.Q,
                 "Response Pts": m.response_points,
@@ -720,6 +968,26 @@ def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
                 "Individual Score": m.individual_score,
                 "Grade Δ": f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%",
                 "Performance": m.performance,
-                "Self-eval?": "Yes" if m.submitted_self_eval else "No",
+                # Was `submitted_self_eval`, which is true for anyone who
+                # submitted the survey at all — so the column read "Yes" for
+                # every student who responded and told the instructor nothing.
+                # `self_responded` is the question the heading asks: did they
+                # rate themselves?
+                "Self-eval?": "Yes" if m.self_responded else "No",
             })
     return pd.DataFrame(rows)
+
+
+def constant_columns(frame: pd.DataFrame) -> List[str]:
+    """Which columns have the same value in every row?
+
+    "These numbers are the same for all students" is a bug report PeerParley
+    received more than once, and the honest answer varies: a column can be
+    constant because the survey never asked the question, because the rounding
+    step is wider than the differences, or because the students really were
+    indistinguishable. The report cannot tell which without saying it, so the
+    results tab names the constant columns and points at the explanation.
+    """
+    skip = {"Team", "Name"}
+    return [c for c in frame.columns
+            if c not in skip and frame[c].astype(str).nunique(dropna=False) <= 1]
