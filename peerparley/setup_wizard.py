@@ -94,16 +94,19 @@ def storage_problem() -> str:
     whose package is not installed. It used to arrive as a raw
     `ModuleNotFoundError: dropbox` traceback on the sign-in screen — an
     instructor cannot act on that, and it looks like the app itself is broken.
+
+    This runs before anything is painted, so it asks only questions that can be
+    answered locally: is the backend's package installed, do its credentials
+    parse. It deliberately does NOT ask whether the provider is reachable —
+    that is a network round trip, and putting one in front of the first paint
+    is how a slow or unresponsive provider turns into a page that never loads
+    and a spinner that never stops. Reachability is reported in the sidebar,
+    after the app is on screen, from the outcome of the work it actually does.
     """
     try:
         from .vault import Vault
         vault = Vault()
-        if not vault.available:
-            return vault.error
-        ok, message = vault.healthcheck()
-        # A missing encryption key is the setup screen's business, not this
-        # one's; only report the storage side here.
-        return "" if (ok or "encryption" in message.lower()) else message
+        return "" if vault.available else vault.error
     except Exception as exc:  # noqa: BLE001
         return f"Storage could not be opened: {exc}"
 

@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.14.2 — the spinner that never stopped
+
+Reported: *"all that I am getting is the app spinner when I try to run the
+app."* A permanent spinner means the script never finished, and 2.14.1 is why.
+
+Fixing the Dropbox traceback, I put a storage health check in front of the
+sign-in screen — the first thing the app did was a network round trip. With a
+provider that answers slowly, or a credential that makes the SDK retry, nothing
+was painted at all: the page sat spinning while a request it could not see ran
+underneath. Measured with a backend that takes six seconds to answer, first
+paint took 6.5 seconds; it now takes 0.8, because it no longer waits.
+
+**Nothing before the sign-in screen touches the network.** The pre-sign-in
+check now asks only what can be answered locally — is the backend's package
+installed, do its credentials parse — which is what catches the missing
+`dropbox` package without asking the provider anything. Whether storage is
+*reachable* is a different question, and it belongs after the app is on screen.
+
+**The status badge costs nothing.** It used to be its own probe; it now reports
+the outcome of the work the app actually did, so an app that has just read a
+survey already knows its storage is fine and does not ask again.
+
+**Every network call is bounded.** The Dropbox client is built with a
+twenty-second timeout and one retry instead of the SDK's hundred seconds and
+four, so a wrong credential fails in a way the app can explain rather than
+spinning for minutes.
+
+**The read cache window is a minute, not fifteen seconds.** The short window
+failed in exactly the case that mattered: when the provider is slow, a single
+cold page took longer than the window, so entries expired *during* the run that
+fetched them and the next click paid for all of them again. With a six-second
+backend, a second interaction now costs zero storage calls, where it used to
+cost another full round trip. "Check for new responses" remains the way to
+demand an answer immediately.
+
+2 new tests (263 total): one drives the app against a backend that sleeps and
+fails if anything is read before the sign-in screen paints, the other fails if
+a network client is ever constructed without a bounded wait.
+
 ## 2.14.1 — ModuleNotFoundError: dropbox, at sign-in
 
 Reported with a screenshot: signing in produced a traceback ending in

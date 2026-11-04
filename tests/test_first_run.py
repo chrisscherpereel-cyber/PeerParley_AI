@@ -356,3 +356,45 @@ def test_selfcheck_flags_a_backend_whose_package_is_missing(tmp_path):
     assert "storage is set to 'dropbox' but `dropbox` is not installed" in done.stdout
     assert "requirements.txt" in done.stdout
     assert done.returncode == 1          # a problem, not a warning
+
+
+def test_the_app_paints_before_touching_storage(tmp_path):
+    """Reported: "all that I am getting is the app spinner when I try to run the
+    app."
+
+    A permanent spinner means the script never finished. 2.14.1 had put a
+    storage round trip in front of the first paint, so a provider that answers
+    slowly — or a credential that makes the SDK retry — meant nothing appeared
+    at all. The rule, enforced here with a backend that sleeps: nothing before
+    the sign-in screen may touch the network.
+    """
+    import subprocess
+    done = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", "_slow_storage_app.py"),
+         str(tmp_path / "slow"), "4"],
+        capture_output=True, text=True, timeout=900)
+    assert "FAILURES: none" in done.stdout, done.stdout[-3000:]
+    assert done.returncode == 0, done.stdout[-3000:]
+    assert "PASS - no storage call was made before it" in done.stdout
+    assert "PASS - a second interaction costs no storage calls at all" in done.stdout
+
+
+def test_a_slow_backend_cannot_hang_a_page_forever():
+    """Every backend that talks over the network has a bounded wait.
+
+    The Dropbox SDK defaults to a 100-second timeout and four retries, so one
+    wrong credential could keep a page spinning for minutes with nothing on it.
+    """
+    source = open(os.path.join(REPO, "peerparley", "vault.py"),
+                  encoding="utf-8").read()
+    assert "max_retries_on_error" in source
+    assert source.count("timeout") >= 8          # every requests call bounds itself
+    for call in ("dropbox.Dropbox(", ):
+        start = 0
+        while True:
+            start = source.find(call, start)
+            if start < 0:
+                break
+            window = source[start:start + 320]
+            assert "_limits" in window, f"unbounded Dropbox client at offset {start}"
+            start += 1

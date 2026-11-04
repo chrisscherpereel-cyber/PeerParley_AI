@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 261 passed
+python3 -m pytest tests/ -q          # expect: 263 passed
 python3 qa_regression.py             # expect: 93/93 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```

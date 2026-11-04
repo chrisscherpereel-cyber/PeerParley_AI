@@ -147,14 +147,20 @@ class DropboxBackend:
     def __init__(self, folder: str, opts: dict):
         import dropbox
         self.folder = "/" + folder.strip("/")
+        # Bounded: the SDK's defaults are a 100-second timeout and four retries,
+        # so one wrong credential can keep a page spinning for minutes with
+        # nothing on screen. Failing in twenty seconds lets the app say what is
+        # wrong instead.
+        _limits = {"timeout": 20, "max_retries_on_error": 1}
         if opts.get("refresh_token"):
             self.dbx = dropbox.Dropbox(
                 oauth2_refresh_token=opts["refresh_token"],
                 app_key=opts.get("app_key"),
                 app_secret=opts.get("app_secret"),
+                **_limits,
             )
         else:
-            self.dbx = dropbox.Dropbox(opts["access_token"])
+            self.dbx = dropbox.Dropbox(opts["access_token"], **_limits)
 
     def _p(self, name: str) -> str:
         return f"{self.folder}/{name}"
@@ -326,7 +332,13 @@ def _make_backend(cfg: VaultConfig) -> StorageBackend:
 # key and the plaintext — so this adds no exposure that the app did not already
 # have. Nothing is written to disk.
 
-CACHE_TTL = 15.0
+# A minute. Fifteen seconds was too short in the case that matters most: when
+# the provider is slow, a single cold page can take longer than the window, so
+# entries expired *during* the run that fetched them and the next click paid
+# for them all over again. A minute also covers an instructor working through a
+# tab without re-reading anything, while "Check for new responses" stays the
+# instrument for wanting an answer now.
+CACHE_TTL = 60.0
 
 _reads: Dict[Tuple[str, str, str], Tuple[float, Any]] = {}
 _listings: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
@@ -359,6 +371,12 @@ class Vault:
         # an actual read or write raises.
         self._backend: Optional[StorageBackend] = None
         self._error = ""
+        # How the last real read or write went. The sidebar's status badge is
+        # drawn from this rather than from a probe of its own: a dedicated
+        # probe is a network round trip on a page that has already done its
+        # work, and when storage is slow to answer it delays the whole page.
+        self._last_ok: Optional[bool] = None
+        self._last_error = ""
         try:
             self._backend = _make_backend(self.cfg)
         except VaultUnavailable as exc:
@@ -374,7 +392,18 @@ class Vault:
 
     @property
     def available(self) -> bool:
+        """Can this app open its storage at all? Answered without any I/O.
+
+        Deliberately local: it reports a missing package or credentials that do
+        not parse, and says nothing about whether the provider is reachable.
+        That distinction is what keeps a slow or unreachable provider from
+        delaying the sign-in screen — the app can ask this before painting
+        anything, and ask the reachability question later.
+        """
         return self._backend is not None
+
+    def _record(self, ok: bool, error: str = "") -> None:
+        self._last_ok, self._last_error = ok, error
 
     @property
     def error(self) -> str:
@@ -436,7 +465,14 @@ class Vault:
 
     # ---- the operations -------------------------------------------------
     def put_bytes(self, name: str, data: bytes) -> str:
-        out = self.backend.put(name, encrypt_bytes(data))
+        try:
+            out = self.backend.put(name, encrypt_bytes(data))
+        except VaultUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._record(False, f"Could not write to storage: {exc}")
+            raise
+        self._record(True)
         # Remember what was just written rather than dropping the entry: a save
         # is immediately followed by a read of the same object (the page redraws
         # from it), and that read must return the new value, not the old one and
@@ -454,6 +490,8 @@ class Vault:
             return hit[1]
         try:
             data = decrypt_bytes(self.backend.get(name))
+        except VaultUnavailable:
+            raise
         except Exception:
             # Cache the absence too, but only that: a decryption failure is
             # remembered as "missing" for a few seconds, and the error itself is
@@ -467,7 +505,14 @@ class Vault:
         hit = _listings.get(self._scope)
         if hit is not None and _now() - hit[0] < CACHE_TTL:
             return list(hit[1])
-        names = self.backend.list()
+        try:
+            names = self.backend.list()
+        except VaultUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._record(False, f"Storage '{self.cfg.backend}' is not reachable: {exc}")
+            raise
+        self._record(True)
         _listings[self._scope] = (_now(), list(names))
         return list(names)
 
@@ -486,6 +531,10 @@ class Vault:
         """
         if not self.available:
             return False, self._error
+        if self._last_ok is True:
+            return True, f"Storage '{self.cfg.backend}' is ready."
+        if self._last_ok is False and self._last_error:
+            return False, self._last_error
         try:
             # Through the cache: this check runs on every rerun, and it was the
             # last thing still making a round trip on each one. A green badge
