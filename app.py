@@ -49,7 +49,7 @@ from peerparley.grading import (
     data_warnings as grading_warnings,
     results_to_frame,
     COLUMN_HELP,
-    constant_columns,
+    trim_constant_columns,
 )
 from peerparley import pdfgen
 from peerparley import email_delivery as mail
@@ -618,12 +618,19 @@ and whether it looks copy-pasted. This rewards taking the evaluation seriously.
 quality, effect) each average to a 0–100% score → a letter grade, shown to the
 student so they know *where* they're strong or weak.
 
-**6. Performance (High / Adequate / Low)** — from the **forced ranking** when the
-survey collected it; otherwise from the pay grade (above/below the team average by
-a set band).
+**6. Performance (High / Adequate / Low)** — when the survey collected the **forced
+ranking**, this is the label the student's teammates settled on: their average rank
+(High = 1, Adequate = 2, Low = 3) rounded to the nearest of the three. So two
+Adequates and one Low is **Adequate**, and a dead tie between two labels lands on
+Adequate, because a split verdict is not a clear High or a clear Low. Without a
+ranking it comes from the pay grade (above/below the team average by a set band).
 
 **7. Self-evaluation** — the student's own ratings appear next to their peers' on
-their feedback sheet, so they can see the gap.
+their feedback sheet, so they can see the gap. The instructor summary puts a number
+on it: for each rating statement the student answered about themselves, their own
+rating minus their peers' average, averaged across the statements and shown in
+points of the 7-point scale. "+1.2 (higher)" means they rated themselves 1.2 points
+above their team.
 """
 
 
@@ -1641,6 +1648,34 @@ with tabs[2]:
     if S.pop("_settings_restored", False):
         st.info("These are the grading rules saved with the session you resumed.",
                 icon="↩")
+    if S.pop("_settings_defaulted", False):
+        st.success("Every grading rule is back to its default.", icon="↩")
+
+    # A way back. Eleven controls, several of them behind an expander, and no
+    # way to tell which had been nudged — an instructor who had experimented
+    # could not get back to a known state except by re-reading the
+    # documentation and setting each one by hand. Offered only when something
+    # actually differs from the defaults, so it is never a button that does
+    # nothing, and it names what would change before it changes it.
+    _defaults = GradeSettings()
+    _changed = [(f, getattr(_gs0, f), getattr(_defaults, f))
+                for f in _defaults.__dataclass_fields__
+                if getattr(_gs0, f) != getattr(_defaults, f)]
+    if _changed:
+        _rc1, _rc2 = st.columns([1, 2.4])
+        if _rc1.button("↩ Restore defaults", key="gs_restore",
+                       help="Puts every setting on this tab back to the value "
+                            "PeerParley ships with. Nothing else is touched — "
+                            "not your survey, your responses or your roster — "
+                            "and grades are simply recomputed."):
+            S["settings"] = GradeSettings()
+            S["_settings_defaulted"] = True
+            st.rerun()
+        _rc2.caption(
+            f"{len(_changed)} setting(s) differ from the defaults: "
+            + ", ".join(f"`{f}` {old!r} → default {new!r}"
+                        for f, old, new in _changed[:4])
+            + (f", +{len(_changed) - 4} more" if len(_changed) > 4 else ""))
 
     st.markdown("##### Peer-adjustment method")
     _sources = ["allocation", "rating", "ranking", "combined"]
@@ -1792,27 +1827,27 @@ with tabs[3]:
             # Streamlit only grew `column_config` in 1.23 and the `help` field
             # after that, so a version that does not understand it must get a
             # plain dataframe rather than a traceback.
+            # A column with one value in it says nothing about any individual,
+            # and it takes width from the columns that do. So it comes out of
+            # the table — and comes back as a caption, because "every student
+            # scored the same" is itself worth knowing.
+            _shown, _dropped = trim_constant_columns(frame)
             try:
                 _cc = {c: st.column_config.Column(c, help=COLUMN_HELP[c])
-                       for c in frame.columns if c in COLUMN_HELP}
-                st.dataframe(frame, **FULL_WIDTH, height=380, column_config=_cc)
+                       for c in _shown.columns if c in COLUMN_HELP}
+                st.dataframe(_shown, **FULL_WIDTH, height=380, column_config=_cc)
             except Exception:  # noqa: BLE001
-                st.dataframe(frame, **FULL_WIDTH, height=380)
-            # "These numbers are the same for everyone" was reported as a bug
-            # three times, and was a different thing each time. Name the
-            # columns that are constant and say what makes a column constant,
-            # rather than leaving the instructor to guess which it is.
-            _const = constant_columns(frame)
-            if _const and len(frame) > 1:
+                st.dataframe(_shown, **FULL_WIDTH, height=380)
+            if _dropped:
                 st.caption(
-                    "**The same for every student in this section:** "
-                    + ", ".join(f"*{c}*" for c in _const)
-                    + ". That is worth a look — a column goes flat when the "
-                      "survey never asked the question, when the rounding step "
-                      "on the Grading rules tab is wider than the differences "
-                      "between students, or when the students genuinely were "
-                      "indistinguishable on it. The column descriptions below "
-                      "say what each one is built from.")
+                    "**Not shown, because every student in this section has the "
+                    "same value:** "
+                    + ", ".join(f"*{c}* = {v or '—'}" for c, v in _dropped.items())
+                    + ". A column goes flat when the survey never asked the "
+                      "question, when the rounding step on the Grading rules "
+                      "tab is wider than the differences between students, or "
+                      "when the students genuinely were indistinguishable on "
+                      "it. The Results CSV below keeps every column.")
             with st.expander("What does each column mean?"):
                 st.caption("Hover any column heading in the table for the same "
                            "text. It is also printed on the last page of the "

@@ -249,6 +249,10 @@ class StudentResult:
     self_quantity: str = ""
     self_quality: str = ""
     self_effect: str = ""
+    # Mean (self − peers) across the rating dimensions, in points of the
+    # 7-point scale. NaN when the student did not rate themselves, or when no
+    # peer ratings exist to compare with. See `self_peer_gap`.
+    self_gap: float = float("nan")
     # ---- comments received (split for the feedback report) ----
     public_comments: List[str] = field(default_factory=list)
     contributions: List[str] = field(default_factory=list)   # "what teammates valued"
@@ -287,13 +291,29 @@ def _performance_label(method, received_avg, team_avg, band, rank, n):
 
 
 def _forced_performance(mean_rank: float) -> Optional[str]:
-    """Forced ranking: 1=High, 2=Adequate, 3=Low → High/Adequate/Low."""
+    """The label this student's teammates settled on. 1=High, 2=Adequate, 3=Low.
+
+    Their average rank, rounded to whichever of the three labels is nearest:
+
+        mean < 1.5          High
+        1.5 ≤ mean ≤ 2.5    Adequate
+        mean > 2.5          Low
+
+    So two Adequates and one Low (mean 2.33) is **Adequate** — the label most
+    of the team chose — and a dead tie between two labels resolves to Adequate,
+    because a split verdict is not a clear High and not a clear Low either.
+
+    It used to map the mean onto 0–1 as (3 − mean)/2 and cut at 0.8 and 0.4,
+    which needed a mean of 1.2 or better for High and 2.2 or better for
+    Adequate. Those cuts sit nowhere near the midpoints between the labels, so
+    the commonest split verdicts came out a tier low: two Adequates and one Low
+    read "Low", and two Highs and one Adequate (mean 1.33) read "Adequate".
+    """
     if mean_rank is None or (isinstance(mean_rank, float) and math.isnan(mean_rank)):
         return None
-    v = (3.0 - mean_rank) / 2.0          # rank 1 → 1.0, 2 → 0.5, 3 → 0.0
-    if v >= 0.8:
+    if mean_rank < 1.5:
         return "High"
-    if v >= 0.4:
+    if mean_rank <= 2.5:
         return "Adequate"
     return "Low"
 
@@ -304,6 +324,53 @@ def _num(v):
         return f if not math.isnan(f) else None
     except (TypeError, ValueError):
         return None
+
+
+# --------------------------------------------------------------------------- #
+# How a student's view of themselves compares with their team's
+# --------------------------------------------------------------------------- #
+# "Did they self-evaluate?" was a yes/no that said nothing — every student in
+# the table submitted, so it read Yes for all of them. The useful question is
+# the *gap*: a student who rates themselves a point and a half above everyone
+# else is the conversation an instructor wants to have, and so is one who rates
+# themselves well below.
+#
+# The measure: for each of the four rating statements where both a self-rating
+# and at least one peer rating exist, take self minus the peers' mean; average
+# those differences; report it in points of the original 7-point scale. One
+# number, in the units the students actually answered in, so "+1.2" reads as
+# "rated themselves 1.2 points higher than their team did, on average across
+# the four statements".
+#
+# Dimensions the student skipped, and dimensions no peer rated, are left out
+# rather than counted as zero — a blank is not agreement.
+SELF_GAP_ALIGNED = 0.5      # within half a scale point either way: in line
+
+
+def self_peer_gap(self_vals: List[float], peer_vals: List[float]) -> float:
+    """Mean (self − peers) across the rating dimensions, in 7-point units.
+
+    `self_vals` and `peer_vals` are both already divided by 7 (the 0–1 form the
+    dimension letter grades are cut from), so the difference is multiplied back
+    up to the scale the question was asked on. NaN when there is nothing to
+    compare.
+    """
+    diffs = [(s - p) * 7.0 for s, p in zip(self_vals, peer_vals)
+             if s == s and p == p]
+    return float(np.mean(diffs)) if diffs else float("nan")
+
+
+def describe_self_gap(gap: float) -> str:
+    """The gap as the results table shows it: a signed number and a word."""
+    if gap is None or (isinstance(gap, float) and math.isnan(gap)):
+        return "—"
+    if abs(gap) <= SELF_GAP_ALIGNED:
+        word = "in line"
+    elif gap > 0:
+        word = "higher"
+    else:
+        word = "lower"
+    return f"{gap:+.1f} ({word})"
 
 
 # --------------------------------------------------------------------------- #
@@ -662,6 +729,7 @@ def compute(
                 self_responded=self_responded, self_vals=self_vals,
                 self_team_player=self_letters[0], self_quantity=self_letters[1],
                 self_quality=self_letters[2], self_effect=self_letters[3],
+                self_gap=self_peer_gap(self_vals, peer_vals),
                 public_comments=all_pub, contributions=recv_contrib, improvements=recv_improve,
                 confidential_comments=conf.get(k, []),
                 received_breakdown=[round(x, 1) for x in rec],
@@ -923,24 +991,30 @@ COLUMN_HELP: Dict[str, str] = {
                     "so skipping three and writing one good comment does not "
                     "score full marks. This is the only column about their own "
                     "effort as an evaluator.",
-    "Multiplier": "What the team score is multiplied by to get this student's "
-                  "individual score. 1.0000 is no change.",
-    "Individual Score": "The student's score: the team score times the "
-                        "multiplier, after rounding. This is the number that "
-                        "goes in the gradebook.",
-    "Grade Δ": "Individual Score minus the team score, in points — the same "
-               "information as the multiplier, in the units of the gradebook. "
-               "Rounded to the step set on the Grading rules tab, and the "
-               "rounded figure is what is applied, so the two always agree.",
-    "Performance": "High / Adequate / Expected / Low, from the forced ranking "
-                   "when the survey collected one, otherwise from how far the "
-                   "student sat from their team's average. “No data” "
-                   "means no teammate evaluated them at all.",
-    "Self-eval?": "Did this student complete the self-evaluation — the ratings "
-                  "of themselves that appear beside their peers' in their "
-                  "report. “No” means they submitted an evaluation "
-                  "of their teammates but left their own ratings blank, or the "
-                  "survey did not ask for them.",
+    "Individual Score": "The student's score: the team score plus the grade "
+                        "change. This is the number that goes in the gradebook.",
+    "Grade Δ": "Individual Score minus the team score, in points. Rounded to "
+               "the step set on the Grading rules tab, and the rounded figure "
+               "is what is applied, so the report and the gradebook always "
+               "agree.",
+    "Performance": "High / Adequate / Expected / Low. When the survey "
+                   "collected the forced ranking, this is the label the "
+                   "student's teammates settled on: their average rank "
+                   "(High=1, Adequate=2, Low=3) rounded to the nearest of the "
+                   "three, so two Adequates and one Low is Adequate. Without a "
+                   "ranking it comes from how far the student sat from their "
+                   "team's average. “No data” means no teammate "
+                   "evaluated them at all.",
+    "Self vs peers": "How the student's view of themselves compares with their "
+                     "team's. For each rating statement they answered about "
+                     "themselves, their own rating minus their peers' average "
+                     "for it; averaged across the four statements and shown in "
+                     "points of the 7-point scale. “+1.2 (higher)” "
+                     "means they rated themselves 1.2 points above their team, "
+                     "on average; “in line” is within half a point "
+                     "either way. A dash means they did not rate themselves, "
+                     "or the survey collected no rating matrix to compare "
+                     "with.",
 }
 
 
@@ -964,16 +1038,23 @@ def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
                 "A (agreement)": m.A,
                 "Q (support)": m.Q,
                 "Response Pts": m.response_points,
-                "Multiplier": m.multiplier,
+                # The multiplier used to sit here, beside the score and the
+                # delta. All three are the same fact: score = team × multiplier
+                # = team + delta, so two of the three were restating the first
+                # in different units and taking up width the table needed for
+                # something that varies. The delta is the one an instructor
+                # reads (it is in gradebook points and carries a sign), so the
+                # multiplier is gone. `StudentResult.multiplier` is unchanged
+                # for anything that needs the factor itself.
                 "Individual Score": m.individual_score,
                 "Grade Δ": f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%",
                 "Performance": m.performance,
-                # Was `submitted_self_eval`, which is true for anyone who
-                # submitted the survey at all — so the column read "Yes" for
-                # every student who responded and told the instructor nothing.
-                # `self_responded` is the question the heading asks: did they
-                # rate themselves?
-                "Self-eval?": "Yes" if m.self_responded else "No",
+                # Was "Self-eval?" — first `submitted_self_eval`, which is true
+                # for anyone who submitted at all, then `self_responded`, which
+                # at least varied but still only said yes or no. The question
+                # worth a column is how far their view of themselves sits from
+                # their team's; a dash answers the yes/no on the way past.
+                "Self vs peers": describe_self_gap(m.self_gap),
             })
     return pd.DataFrame(rows)
 
@@ -991,3 +1072,27 @@ def constant_columns(frame: pd.DataFrame) -> List[str]:
     skip = {"Team", "Name"}
     return [c for c in frame.columns
             if c not in skip and frame[c].astype(str).nunique(dropna=False) <= 1]
+
+
+def trim_constant_columns(frame: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    """Drop the columns that say the same thing about every student.
+
+    A column with one value in it carries no information about any individual,
+    and across fourteen columns on a landscape page the ones that do carry
+    information are what get squeezed. So they come out of the displayed table
+    and the PDF — and the single value comes back as a caption, because "every
+    student scored the same" is itself worth knowing and silently dropping it
+    would be worse than printing it fourteen times.
+
+    Returns the trimmed frame and {column: the one value}, in column order.
+    The CSV export is deliberately left whole: it is the archival copy.
+
+    Not applied to a section of one student, where every column is constant by
+    arithmetic rather than by anything about the data.
+    """
+    if len(frame) < 2:
+        return frame, {}
+    dropped = {c: str(frame[c].iloc[0]) for c in constant_columns(frame)}
+    if not dropped:
+        return frame, {}
+    return frame.drop(columns=list(dropped)), dropped

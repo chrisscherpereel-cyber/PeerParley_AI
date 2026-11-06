@@ -151,7 +151,7 @@ def main(workdir: str, no_fitz: bool = False) -> int:
     # Earlier tabs render tables of their own (the roster, the response
     # status), so pick the one that is the results table.
     frames = [df.value for df in app.dataframe
-              if "Individual Score" in list(getattr(df.value, "columns", []))]
+              if "Performance" in list(getattr(df.value, "columns", []))]
     check("the results table is on the page", bool(frames))
     if frames:
         frame = frames[0]
@@ -163,9 +163,15 @@ def main(workdir: str, no_fitz: bool = False) -> int:
             n = frame[col].astype(str).nunique()
             check(f"{col} differs between students", n >= 4,
                   f"{n} distinct over {len(frame)} students")
-        check("Self-eval? separates who rated themselves",
-              set(frame["Self-eval?"]) == {"Yes", "No"},
-              str(sorted(set(frame["Self-eval?"]))))
+        check("Self vs peers shows the gap, and a dash for who skipped it",
+              "—" in set(frame["Self vs peers"])
+              and frame["Self vs peers"].nunique() > 2,
+              str(sorted(set(frame["Self vs peers"]))))
+        check("the multiplier is not restating the grade change",
+              "Multiplier" not in frame.columns, str(list(frame.columns)))
+        check("performance is the label the teammates settled on",
+              set(frame["Performance"]) <= {"High", "Adequate", "Low", "No data"},
+              str(sorted(set(frame["Performance"]))))
 
     check("the column glossary is offered",
           any("What does each column mean" in str(getattr(e, "label", ""))

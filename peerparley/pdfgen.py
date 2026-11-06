@@ -23,7 +23,7 @@ from reportlab.lib.utils import simpleSplit
 from reportlab.pdfgen import canvas
 
 from . import branding as B
-from .grading import StudentResult, TeamResult
+from .grading import StudentResult, TeamResult, describe_self_gap
 
 PAGE_W, PAGE_H = letter
 MARGIN = 0.75 * inch
@@ -337,23 +337,74 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
                  + (f"  ·  Eval {eval_no}" if eval_no else ""))
     y -= 22
 
-    # Column layout, in inches from the left margin. Landscape letter is 11"
-    # wide and MARGIN is 0.75" each side, so the last column has to start by
-    # 8.7" to have room for "Expected" — the old layout put Perf at 9.4" and
-    # printed it off the edge of the page.
+    # The columns, as (abbreviated heading, the name in grading.COLUMN_HELP,
+    # how to read it off a student, column width in inches).
     #
-    # Score was missing entirely: the table gave the multiplier and the signed
-    # delta but never the number that goes in the gradebook, which is the one
-    # figure an instructor transcribes.
-    cols = [("Name", 0.0), ("TmPl", 2.3), ("Qty", 2.75), ("Qual", 3.2),
-            ("Effect", 3.65), ("Pay", 4.2), ("Ratio", 4.75), ("A", 5.3),
-            ("Q", 5.7), ("Resp", 6.1), ("Mult", 6.6), ("Grade Δ", 7.25),
-            ("Score", 7.9), ("Perf", 8.7)]
+    # Declared rather than laid out at fixed offsets, for three reasons. The
+    # offsets had drifted past the right edge of the sheet — the last column
+    # used to start 9.4" into a 9.5" text area, so "Expected" printed off the
+    # page. The legend used to keep its own list of headings, which drifted out
+    # of step with this one. And a column that says the same thing about every
+    # student in the section is dropped below, which fixed offsets cannot do.
+    #
+    # The multiplier is not here: score, delta and multiplier are one fact in
+    # three units. The width went to the self-vs-peers gap, which nothing else
+    # in the report carries.
+    COLS = [
+        ("Name", "Name", lambda m: m.name[:26], 2.0),
+        ("TmPl", "Team Player", lambda m: m.team_player or "—", 0.45),
+        ("Qty", "Quantity", lambda m: m.quantity or "—", 0.45),
+        ("Qual", "Quality", lambda m: m.quality or "—", 0.45),
+        ("Effect", "Effect", lambda m: m.effect or "—", 0.55),
+        ("Pay", "Pay Grade",
+         lambda m: "—" if _is_nan(m.pay_grade) else f"{m.pay_grade:.0%}", 0.55),
+        ("Ratio", "Peer Factor", lambda m: f"{m.peer_ratio:.3f}", 0.55),
+        ("A", "A (agreement)", lambda m: f"{m.A:.2f}", 0.40),
+        ("Q", "Q (support)",
+         lambda m: "—" if _is_nan(m.Q) else f"{m.Q:.2f}", 0.40),
+        ("Resp", "Response Pts", lambda m: str(m.response_points), 0.50),
+        ("Grade Δ", "Grade Δ",
+         lambda m: f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%", 0.60),
+        ("Score", "Individual Score", lambda m: f"{m.individual_score:g}", 0.60),
+        ("Perf", "Performance", lambda m: m.performance[:9], 0.80),
+        ("Self v peers", "Self vs peers",
+         lambda m: describe_self_gap(m.self_gap), 1.10),
+    ]
+
+    # A column with one value in it says nothing about any individual, and
+    # across fourteen columns on a landscape sheet the ones that do carry
+    # information are what get squeezed. So it comes out — and the single value
+    # is printed under the heading instead, because "every student scored the
+    # same" is itself worth knowing.
+    members = [m for t in teams for m in t.members]
+    flat = {}
+    if len(members) > 1:
+        for short, full, get, _w in COLS:
+            if short == "Name":
+                continue
+            seen = {get(m) for m in members}
+            if len(seen) == 1:
+                flat[short] = (full, seen.pop())
+    cols = [col for col in COLS if col[0] not in flat]
+    if flat:
+        c.setFillColor(B.GREY); c.setFont("Helvetica-Oblique", 8)
+        _wrap(c, "Columns left out, because every student in this section has "
+                 "the same value: "
+                 + "; ".join(f"{full} = {val or '—'}"
+                             for full, val in flat.values()) + ".",
+              MARGIN, y, pw - 2 * MARGIN, "Helvetica-Oblique", 8, 10, B.GREY)
+        y -= 12
+
+    # Cumulative x positions from the declared widths.
+    xs, _x = [], 0.0
+    for _s, _f, _g, w in cols:
+        xs.append(MARGIN + _x * inch)
+        _x += w
 
     def col_header():
         c.setFont("Helvetica-Bold", 8); c.setFillColor(B.GREY)
-        for label, dx in cols:
-            c.drawString(MARGIN + dx * inch, yy[0], label)
+        for (short, _f, _g, _w), x in zip(cols, xs):
+            c.drawString(x, yy[0], short)
         yy[0] -= 12
         c.setStrokeColor(B.GREY_LIGHT); c.setLineWidth(0.8)
         c.line(MARGIN, yy[0] + 4, pw - MARGIN, yy[0] + 4)
@@ -369,22 +420,13 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
         yy[0] -= 14
         col_header()
         for m in t.members:
-            c.setFont("Helvetica", 8); c.setFillColor(B.NAVY)
-            vals = [m.name[:28], m.team_player or "—", m.quantity or "—",
-                    m.quality or "—", m.effect or "—",
-                    "—" if _is_nan(m.pay_grade) else f"{m.pay_grade:.0%}",
-                    f"{m.peer_ratio:.3f}", f"{m.A:.2f}",
-                    "—" if _is_nan(m.Q) else f"{m.Q:.2f}",
-                    str(m.response_points), f"{m.multiplier:.4f}", "",
-                    f"{m.individual_score:g}", m.performance[:9]]
-            for (label, dx), v in zip(cols, vals):
-                if label == "Grade Δ":
-                    c.setFillColor(B.grade_color(m.signed_pct))
-                    c.drawString(MARGIN + dx * inch, yy[0],
-                                 f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%")
-                    c.setFillColor(B.NAVY)
-                else:
-                    c.drawString(MARGIN + dx * inch, yy[0], v)
+            c.setFont("Helvetica", 8)
+            for (short, _f, get, _w), x in zip(cols, xs):
+                # The grade change is the one cell that carries a colour.
+                c.setFillColor(B.grade_color(m.signed_pct) if short == "Grade Δ"
+                               else B.NAVY)
+                c.drawString(x, yy[0], get(m))
+            c.setFillColor(B.NAVY)
             yy[0] -= 12
             if yy[0] < MARGIN + 0.9 * inch:
                 _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
@@ -397,7 +439,7 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
     # the Multiplier or the self-evaluation. This PDF is what gets filed,
     # forwarded and quoted back by a student asking how a number was reached,
     # so the explanation has to travel with it.
-    from .grading import COLUMN_HELP, adjustment_note
+    from .grading import COLUMN_HELP, adjustment_note  # noqa: F811
 
     _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN
     c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 13)
@@ -409,14 +451,13 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
     c.line(MARGIN, yy[0], pw - MARGIN, yy[0]); yy[0] -= 18
 
     # The table's headings are abbreviated to fit; map each to the full name.
-    ABBREV = [
-        ("TmPl / Qty / Qual / Effect", "Team Player"),   # one entry, four cols
-        ("Pay", "Pay Grade"), ("Ratio", "Peer Factor"),
-        ("A", "A (agreement)"), ("Q", "Q (support)"),
-        ("Resp", "Response Pts"), ("Mult", "Multiplier"),
-        ("Grade Δ", "Grade Δ"), ("Score", "Individual Score"),
-        ("Perf", "Performance"),
-    ]
+    # Built from COLS, so a column cannot be added to the table without its
+    # explanation appearing here — the two lists drifted apart once already.
+    # The four rating dimensions share one entry; Name needs none.
+    ABBREV = [("TmPl / Qty / Qual / Effect", "Team Player")]
+    ABBREV += [(short, full) for short, full, _g, _w in COLS
+               if full not in ("Name", "Team Player", "Quantity", "Quality",
+                               "Effect")]
     for short, full in ABBREV:
         if yy[0] < MARGIN + 0.9 * inch:
             _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN

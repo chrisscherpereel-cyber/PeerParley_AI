@@ -153,10 +153,19 @@ check("changing B changes the multiplier",
 
 frame = results_to_frame(teams)
 fay = frame[frame["Name"] == NON_SUBMITTER].iloc[0]
-check("non-submitter flagged Self-eval = No", fay["Self-eval?"] == "No")
-submitters = frame[frame["Self-eval?"] == "Yes"]
-check("submitters get a numeric grade",
-      submitters["Grade Δ"].str.contains("%").all())
+# The yes/no "Self-eval?" column became "Self vs peers" in 2.15.1: how far the
+# student's view of themselves sits from their team's, in points of the 7-point
+# scale. A student who never submitted rated nobody, themselves included, so
+# there is nothing to compare and the cell is a dash.
+check("non-submitter has no self-vs-peers gap", fay["Self vs peers"] == "—")
+rated_self = frame[frame["Self vs peers"] != "—"]
+check("students who rated themselves show a signed gap",
+      len(rated_self) > 0
+      and rated_self["Self vs peers"].str.match(r"^[+-]\d").all())
+check("students who rated themselves get a numeric grade",
+      rated_self["Grade Δ"].str.contains("%").all())
+check("the multiplier no longer restates the grade change",
+      "Multiplier" not in frame.columns)
 
 # NOTE — open question for the instructor, not a v2 regression.
 # The previous harness asserted that a non-submitter's "Grade Δ" renders as an

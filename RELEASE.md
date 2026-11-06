@@ -1,6 +1,6 @@
 # Release checklist
 
-What was validated before 2.15.0, and what to re-run before any future
+What was validated before 2.15.1, and what to re-run before any future
 release. Everything here is a command, so the answer is never a matter of
 opinion.
 
@@ -8,8 +8,8 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 293 passed
-python3 qa_regression.py             # expect: 93/93 checks passed
+python3 -m pytest tests/ -q          # expect: 317 passed
+python3 qa_regression.py             # expect: 95/95 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
 
@@ -22,6 +22,7 @@ python3 selfcheck.py                 # expect: exit 0 on a configured install
 | `qa_regression.py` | the real app driven headless through Streamlit's test runner: grading, PDFs, email packs, the AI review panel, the setup gate |
 | `tests/test_results_reports.py` | the results table and the reports: that every column has an explanation and no explanation outlives its column, that the grade columns actually differentiate students on default settings, that a flat column names its own cause, and that three report previews on one page do not collide |
 | `tests/_results_tab_app.py` | the real Results tab with both preview boxes ticked, run twice — with PyMuPDF and without, which is how a Streamlit Cloud deployment is configured. The duplicate-widget-id bug was in the *page*: the PDF bytes were always correct |
+| `tests/_restore_defaults_app.py` | pressing **Restore defaults** on the Grading rules tab, and failing unless the controls themselves come back — none of them carries a Streamlit `key`, so widget identity comes from each one's own arguments, which is a property of the framework and has to be exercised through it |
 | `tests/_rerun_cost.py` | what one rerun costs in storage round trips, with a 40-student section loaded — the number that decides whether the app feels fast on a cloud store, and the one a local timing cannot see |
 
 ## 1a. Performance, measured rather than felt

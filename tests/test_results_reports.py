@@ -51,13 +51,17 @@ from peerparley.grading import (  # noqa: E402
     AGREEMENT_FLOOR,
     COLUMN_HELP,
     GradeSettings,
+    _forced_performance,
     adjustment_note,
     agreement_weight,
     compute,
     constant_columns,
+    describe_self_gap,
     dispersion_reference,
     missing_adjustment_source,
     results_to_frame,
+    self_peer_gap,
+    trim_constant_columns,
 )
 
 
@@ -184,8 +188,8 @@ def test_a_unanimous_section_does_not_turn_a_dollar_into_a_penalty():
 def test_the_grade_columns_are_not_the_same_for_everyone():
     """The report as the instructor sees it, with the shipped defaults."""
     frame = results_to_frame(compute(section(), GradeSettings()))
-    for column in ("Individual Score", "Grade Δ", "Multiplier",
-                   "A (agreement)", "Peer Factor"):
+    for column in ("Individual Score", "Grade Δ", "A (agreement)",
+                   "Peer Factor"):
         assert frame[column].astype(str).nunique() >= 8, (
             f"{column} has only {frame[column].astype(str).nunique()} distinct "
             f"values across {len(frame)} students")
@@ -206,28 +210,138 @@ def test_performance_still_separates_students():
 
 
 # --------------------------------------------------------------------------- #
-# Self-eval?
+# Self vs peers
 # --------------------------------------------------------------------------- #
-def test_self_eval_column_asks_whether_they_rated_themselves():
-    """It used to report `submitted_self_eval` — "did they submit at all" —
-    which is Yes for every student in the table, by construction."""
+def test_the_self_column_reports_the_gap_not_a_yes_or_no():
+    """It reported `submitted_self_eval` — "did they submit at all" — which is
+    Yes for every student in the table by construction; then `self_responded`,
+    which varied but still only said yes or no. What an instructor can act on
+    is how far the student's view of themselves sits from their team's."""
     teams = compute(section(), GradeSettings(), self_evals=self_evals(every=False))
     frame = results_to_frame(teams)
-    assert set(frame["Self-eval?"]) == {"Yes", "No"}
-    # And it matches the flag the report actually renders a self-grade from.
+    assert "Self-eval?" not in frame.columns
+    assert "Self vs peers" in frame.columns
+    assert frame["Self vs peers"].nunique() > 3
+    # A student who did not rate themselves still reads as not having done so.
     by_name = {m.name: m for t in teams for m in t.members}
     for _, row in frame.iterrows():
-        expected = "Yes" if by_name[row["Name"]].self_responded else "No"
-        assert row["Self-eval?"] == expected
+        if not by_name[row["Name"]].self_responded:
+            assert row["Self vs peers"] == "—"
+        else:
+            assert row["Self vs peers"] != "—"
 
 
-def test_a_student_who_submitted_but_skipped_their_own_ratings_reads_no():
+def test_the_gap_is_the_mean_difference_in_points_of_the_seven_point_scale():
+    """Self minus the peers' mean, per dimension, averaged — in the units the
+    question was asked in, so the number needs no translating."""
+    # Self 6/7 on every statement; peers' means 4/7, 5/7, 4/7, 3/7.
+    gap = self_peer_gap([6 / 7] * 4, [4 / 7, 5 / 7, 4 / 7, 3 / 7])
+    assert gap == pytest.approx(((6 - 4) + (6 - 5) + (6 - 4) + (6 - 3)) / 4)
+    assert describe_self_gap(gap) == "+2.0 (higher)"
+    assert describe_self_gap(-1.4) == "-1.4 (lower)"
+    assert describe_self_gap(0.3) == "+0.3 (in line)"
+    assert describe_self_gap(-0.5) == "-0.5 (in line)"
+
+
+def test_a_dimension_nobody_answered_is_left_out_not_counted_as_agreement():
+    nan = float("nan")
+    # Only the second statement has both a self-rating and a peer average.
+    assert self_peer_gap([nan, 7 / 7, nan, 5 / 7],
+                         [3 / 7, 4 / 7, nan, nan]) == pytest.approx(3.0)
+    assert np.isnan(self_peer_gap([nan] * 4, [4 / 7] * 4))
+    assert np.isnan(self_peer_gap([5 / 7] * 4, [nan] * 4))
+    assert describe_self_gap(float("nan")) == "—"
+
+
+def test_a_student_who_skipped_their_own_ratings_has_no_gap():
     teams = compute(section(), GradeSettings(), self_evals={})
     frame = results_to_frame(teams)
-    assert set(frame["Self-eval?"]) == {"No"}
+    assert set(frame["Self vs peers"]) == {"—"}
     assert all(m.submitted_self_eval for t in teams for m in t.members), (
         "every student in this fixture did submit — which is exactly why the "
-        "old column could not vary")
+        "old yes/no column could not vary")
+
+
+# --------------------------------------------------------------------------- #
+# Performance from the forced ranking
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("ranks,expected", [
+    ([2, 2, 3], "Adequate"),       # the case reported: two Adequates, one Low
+    ([1, 1, 2], "High"),           # two Highs and one Adequate
+    ([1, 2, 3], "Adequate"),       # one of each
+    ([3, 3, 2], "Low"),
+    ([1, 1, 1], "High"),
+    ([2, 2, 2], "Adequate"),
+    ([3, 3, 3], "Low"),
+    ([1, 2], "Adequate"),          # a dead tie resolves to the middle label
+    ([2, 3], "Adequate"),
+    ([1, 1, 1, 2, 2], "High"),
+])
+def test_performance_is_the_label_the_teammates_settled_on(ranks, expected):
+    """The average rank rounded to the nearest of the three labels.
+
+    The old mapping sent the mean through (3 − mean)/2 and cut at 0.8 and 0.4,
+    which demanded a mean of 1.2 for High and 2.2 for Adequate — nowhere near
+    the midpoints — so the commonest split verdicts came out a tier low.
+    """
+    assert _forced_performance(float(np.mean(ranks))) == expected
+
+
+def test_no_ranking_collected_leaves_the_forced_label_undecided():
+    assert _forced_performance(float("nan")) is None
+    assert _forced_performance(None) is None
+
+
+def test_the_forced_ranking_beats_the_allocation_based_label():
+    """An instructor who asked for the ranking asked for the ranking."""
+    df = section(rank=True)
+    frame = results_to_frame(compute(df, GradeSettings()))
+    assert set(frame["Performance"]) <= {"High", "Adequate", "Low", "No data"}
+    assert "Expected" not in set(frame["Performance"]), (
+        "'Expected' belongs to the allocation-based label, not to a ranking")
+
+
+# --------------------------------------------------------------------------- #
+# Redundant and flat columns come out of the table
+# --------------------------------------------------------------------------- #
+def test_the_multiplier_is_gone_because_it_restated_the_grade_change():
+    """score = team × multiplier = team + delta. Three columns, one fact."""
+    teams = compute(section(), GradeSettings())
+    frame = results_to_frame(teams)
+    assert "Multiplier" not in frame.columns
+    # The factor itself is still computed, for anything that needs it.
+    assert all(m.multiplier > 0 for t in teams for m in t.members)
+    # And the two that remain still reconstruct it.
+    one = teams[0].members[0]
+    assert one.individual_score == pytest.approx(one.team_score + one.signed_pct)
+
+
+def test_a_column_that_is_the_same_for_everyone_is_dropped_and_reported():
+    frame = results_to_frame(compute(section(alloc=False), GradeSettings()))
+    shown, dropped = trim_constant_columns(frame)
+    assert "Individual Score" in dropped and "Grade Δ" in dropped
+    assert "Individual Score" not in shown.columns
+    # The value comes back, because "everyone scored the same" is worth knowing.
+    assert dropped["Individual Score"] == "100.0"
+    # Identifiers stay whatever happens.
+    assert "Team" in shown.columns and "Name" in shown.columns
+
+
+def test_nothing_is_dropped_from_a_section_whose_columns_all_vary():
+    frame = results_to_frame(compute(section(), GradeSettings(),
+                                     self_evals=self_evals(every=False)))
+    shown, dropped = trim_constant_columns(frame)
+    assert dropped == {}
+    assert list(shown.columns) == list(frame.columns)
+
+
+def test_a_section_of_one_student_keeps_every_column():
+    """Every column is constant by arithmetic there, not by anything about the
+    data, so trimming would leave a table with two columns in it."""
+    frame = results_to_frame(compute(section(), GradeSettings())).head(1)
+    shown, dropped = trim_constant_columns(frame)
+    assert dropped == {}
+    assert list(shown.columns) == list(frame.columns)
 
 
 # --------------------------------------------------------------------------- #
@@ -302,6 +416,19 @@ def _pdf_text(data: bytes) -> str:
         return "\n".join(page.get_text() for page in doc)
 
 
+def _summary_header_row(data: bytes) -> list:
+    """The section summary's column headings, as printed on the first team."""
+    text = _pdf_text(data)
+    after = text.split("Team score", 1)[1]
+    lines = [ln.strip() for ln in after.splitlines() if ln.strip()][1:]
+    out = []
+    for line in lines:
+        if line.startswith("Student"):     # the first data row
+            break
+        out.append(line)
+    return out
+
+
 def test_the_summary_pdf_prints_the_score_that_goes_in_the_gradebook():
     """It showed the multiplier and the signed delta but not the score — the
     one figure an instructor transcribes."""
@@ -334,6 +461,70 @@ def test_the_summary_pdf_column_headers_fit_on_the_page():
     assert 8.7 * inch + stringWidth("Expected", "Helvetica", 8) <= usable
     # And the old layout did not, which is why it moved.
     assert 9.4 * inch + stringWidth("Expected", "Helvetica", 8) > usable
+
+
+def test_the_summary_pdf_prints_the_self_vs_peers_gap():
+    teams = compute(section(), GradeSettings(), self_evals=self_evals(every=False))
+    text = _pdf_text(pdfgen.build_section_summary_pdf(teams, "QC101", "1"))
+    assert "Self v peers" in text
+    assert "(in line)" in text or "(higher)" in text or "(lower)" in text
+
+
+def test_the_summary_pdf_drops_a_flat_column_and_says_which():
+    """A column of thirty identical cells squeezes the ones that carry
+    information, on a sheet that has no width to spare."""
+    fitz = pytest.importorskip("fitz")
+    teams = compute(section(alloc=False), GradeSettings())   # no self-evals either
+    data = pdfgen.build_section_summary_pdf(teams, "QC101", "1")
+    text = _pdf_text(data)
+    assert "Columns left out" in text
+    for name in ("Pay Grade", "Peer Factor", "Individual Score"):
+        assert name in text, name
+    # The table proper no longer carries their headings. Read off the header
+    # row itself, because "Pay Grade" and "Score" also appear in the note above
+    # it and in "Team score 100".
+    header = _summary_header_row(data)
+    for heading in ("Pay", "Ratio", "Score", "Self v peers"):
+        assert heading not in header, f"{heading} still in {header}"
+    # What varies stays. (Performance is dropped here too: with no allocation
+    # and no ranking, every student reads "Expected".)
+    for kept in ("Name", "TmPl", "Qty", "Resp"):
+        assert kept in header, f"{kept} missing from {header}"
+    # The legend still explains them, since the note above names them.
+    assert "What each column means" in text
+
+
+def test_the_summary_pdf_keeps_every_column_when_they_all_vary():
+    teams = compute(section(), GradeSettings(), self_evals=self_evals(every=False))
+    text = _pdf_text(pdfgen.build_section_summary_pdf(teams, "QC101", "1"))
+    assert "Columns left out" not in text
+
+
+def test_the_summary_pdf_does_not_print_past_the_right_margin():
+    """The last column used to start 9.4 inches into a 9.5-inch text area."""
+    fitz = pytest.importorskip("fitz")
+    from reportlab.lib.pagesizes import landscape, letter
+    teams = compute(section(rank=True), GradeSettings(),
+                    self_evals=self_evals(every=False))
+    data = pdfgen.build_section_summary_pdf(teams, "A Rather Long Course Name", "1")
+    limit = landscape(letter)[0] - pdfgen.MARGIN
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        over = [(round(w[2], 1), w[4]) for page in doc
+                for w in page.get_text("words") if w[2] > limit + 1]
+    assert not over, f"printed past the right margin: {over[:6]}"
+
+
+def test_the_pdf_legend_cannot_drift_from_the_pdf_table():
+    """Both come from one declaration in build_section_summary_pdf, so every
+    heading in the table has to be explained on the legend page."""
+    teams = compute(section(), GradeSettings(), self_evals=self_evals(every=False))
+    text = _pdf_text(pdfgen.build_section_summary_pdf(teams, "QC101", "1"))
+    table, legend = text.split("What each column means", 1)
+    headings = [h for h in ("Pay", "Ratio", "A", "Q", "Resp", "Grade Δ",
+                            "Score", "Perf", "Self v peers")]
+    for h in headings:
+        assert h in table.replace("∆", "Δ"), f"{h} missing from the table"
+        assert h in legend.replace("∆", "Δ"), f"{h} missing from the legend"
 
 
 def test_an_empty_confidential_report_says_so_rather_than_being_blank():
@@ -455,7 +646,32 @@ def test_the_whole_results_tab_renders_in_the_real_app(tmp_path, pymupdf):
     assert ("PASS - the confidential feedback panel rendered" in done.stdout), \
         done.stdout[-4000:]
     assert "PASS - every column on screen has an explanation" in done.stdout
-    assert "PASS - Self-eval? separates who rated themselves" in done.stdout
+    assert ("PASS - Self vs peers shows the gap, and a dash for who skipped it"
+            in done.stdout)
+    assert ("PASS - performance is the label the teammates settled on"
+            in done.stdout)
+
+
+def test_restoring_the_grading_defaults_works_in_the_real_app(tmp_path):
+    """Asked for: a way back from eleven controls, several behind an expander,
+    with no way to tell which had been nudged.
+
+    Driven rather than unit-tested because the mechanism is Streamlit's: none
+    of those widgets carries a `key`, so each one's identity comes from its own
+    arguments, and putting the defaults back into session state is what makes
+    every widget re-render at its default. The driver is
+    tests/_restore_defaults_app.py.
+    """
+    done = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", "_restore_defaults_app.py"),
+         str(tmp_path / "restore")],
+        capture_output=True, text=True, timeout=900, cwd=REPO)
+    assert "FAILURES: none" in done.stdout, done.stdout[-4000:]
+    assert done.returncode == 0, done.stdout[-4000:]
+    assert "PASS - every grading rule is back to its default" in done.stdout
+    assert ("PASS - the controls themselves show the defaults, not just the "
+            "state") in done.stdout
+    assert "PASS - no restore button is offered when nothing differs" in done.stdout
 
 
 def test_selfcheck_requires_everything_requirements_txt_declares():

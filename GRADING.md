@@ -112,15 +112,47 @@ averaged and divided by 7 → a 0–1 score → a letter via `GRADE_SCALE`
 (F … A). Shown to the student so they see *where* they're strong or weak.
 
 ## 7. Performance (High / Adequate / Low)
-- **Forced ranking** when the survey collected it: mean of the 1/2/3 ranks a student
-  received → `(3 − mean)/2` → **High ≥ 0.8**, **Adequate ≥ 0.4**, else **Low**.
+- **Forced ranking** when the survey collected it — the label the student's
+  teammates settled on. Mean of the 1/2/3 ranks they received, rounded to the
+  nearest of the three labels:
+  ```
+  mean < 1.5         High
+  1.5 ≤ mean ≤ 2.5   Adequate
+  mean > 2.5         Low
+  ```
+  Two Adequates and one Low (mean 2.33) is **Adequate**; two Highs and one Adequate
+  (1.33) is **High**; a dead tie between two labels resolves to **Adequate**,
+  because a split verdict is not a clear High and not a clear Low either.
+
+  **Changed in 2.15.1.** It used to map the mean onto 0–1 as `(3 − mean)/2` and cut
+  at 0.8 and 0.4, which demanded a mean of 1.2 or better for High and 2.2 or better
+  for Adequate — cuts that sit nowhere near the midpoints between the labels. The
+  commonest split verdicts therefore came out a tier low: two Adequates and one Low
+  read "Low".
 - **Otherwise** the average-based label: above/below the team average by a set band
-  (default ±8%). The *agreement guard* softens a forced "Low" to "Expected" when
-  evaluators disagreed a lot (`A ≤ 0.5`).
+  (default ±8%). The *agreement guard* softens a "Low" to "Expected" when evaluators
+  disagreed a lot (`A ≤ 0.5`). It applies only to this average-based label — an
+  instructor who collected a forced ranking asked for the ranking.
 
 ## 8. Self-evaluation
 The student's own ratings of themselves are graded the same way and shown next to
 the peer grades on their feedback sheet, so they can see the gap.
+
+The instructor summary puts one number on that gap:
+```
+gap = mean over the rating dimensions of (self_rating − peers' mean rating)
+```
+in points of the original 7-point scale, counting only dimensions where both a
+self-rating and at least one peer rating exist — a blank is not agreement. Shown as
+a signed number and a word: within ±0.5 is **in line**, above is **higher**, below
+is **lower**, and a dash means the student did not rate themselves (or the survey
+collected no rating matrix to compare with). It does **not** feed the grade; it is
+there because a student who rates themselves a point and a half above their team is
+a conversation worth having.
+
+**Changed in 2.15.1.** The column was a yes/no — first "did this student submit
+anything", which is Yes for every student in the table, then "did they rate
+themselves", which varied but said nothing about what they said.
 
 ---
 The instructor controls the two settings most people touch — **sensitivity B** and

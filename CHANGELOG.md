@@ -1,5 +1,62 @@
 # Changelog
 
+## 2.15.1 — the self-evaluation gap, the ranking that was read a tier low
+
+Four changes asked for after 2.15.0, all in the instructor summary and the
+Grading rules tab.
+
+**The self-evaluation column reports the gap, not a yes or a no.** It was
+"Self-eval?" — first "did this student submit anything at all", which is Yes
+for every student in the table by construction, then "did they rate
+themselves", which varied but said nothing about what they said. It is now
+**Self vs peers**: for each rating statement the student answered about
+themselves, their own rating minus their peers' average for it, averaged across
+the statements and shown in points of the original 7-point scale. "+1.2
+(higher)" means they rated themselves 1.2 points above their team; within half
+a point either way reads "in line"; a dash means they did not rate themselves,
+which answers the old yes/no on the way past. Dimensions nobody answered are
+left out rather than counted as zero — a blank is not agreement. It does not
+feed the grade. `GRADING.md` §8 has the method.
+
+**Performance from the forced ranking was coming out a tier low.** The mean of
+the 1/2/3 ranks a student received went through `(3 − mean)/2` and was cut at
+0.8 and 0.4, which demanded a mean of 1.2 or better for High and 2.2 or better
+for Adequate — cuts nowhere near the midpoints between the three labels. Two
+Adequates and one Low (mean 2.33) read **Low**; two Highs and one Adequate
+(1.33) read **Adequate**. The mean is now rounded to the nearest of the three
+labels, so the column is the label the teammates settled on, and a dead tie
+between two labels resolves to Adequate — a split verdict is not a clear High
+and not a clear Low either. **This changes performance labels** wherever a
+survey collected the ranking.
+
+**The Grading rules tab has a Restore defaults button.** Eleven controls,
+several behind an expander, and no way to tell which had been nudged: an
+instructor who had experimented could only get back by re-reading the
+documentation and setting each one by hand. The button appears only when
+something actually differs, names how many settings do and what they are, and
+touches nothing but the grading rules.
+
+**Redundant and flat columns are out of the table.** The multiplier is gone
+from the results table and the summary PDF: score, delta and multiplier are one
+fact in three units, and the delta is the one an instructor reads — it is in
+gradebook points and carries a sign. (`StudentResult.multiplier` is unchanged
+for anything that needs the factor itself.) And any column whose value is the
+same for every student in the section now comes out of both the table and the
+PDF, with the single value printed underneath — because across fourteen columns
+on a landscape sheet, the ones that carry information are what get squeezed,
+and "every student scored the same" is still worth knowing. The Results CSV
+keeps every column; it is the archival copy.
+
+The summary PDF's columns are now declared once, with their widths, instead of
+being laid out at fixed offsets — which is what let them drift past the right
+edge of the sheet — and its legend page is generated from that same
+declaration, so a column cannot be added to the table without its explanation
+appearing with it.
+
+5 new tests and 2 new regression checks (317 tests, 95 checks), including a
+driver that presses Restore defaults in the real app and fails if the controls
+themselves do not come back to their defaults.
+
 ## 2.15.0 — results and reports, audited
 
 Reported: *"provide explanations for each column of the output. The individual

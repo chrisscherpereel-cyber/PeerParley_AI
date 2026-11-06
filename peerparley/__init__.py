@@ -25,4 +25,4 @@ if _sys.version_info < MIN_PYTHON:
         .format(MIN_PYTHON[0], MIN_PYTHON[1], *_sys.version_info[:3])
     )
 
-__version__ = "2.15.0"
+__version__ = "2.15.1"
