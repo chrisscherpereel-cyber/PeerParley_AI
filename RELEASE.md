@@ -1,6 +1,6 @@
 # Release checklist
 
-What was validated before 2.16.0, and what to re-run before any future
+What was validated before 2.16.1, and what to re-run before any future
 release. Everything here is a command, so the answer is never a matter of
 opinion.
 
@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 354 passed
+python3 -m pytest tests/ -q          # expect: 367 passed
 python3 qa_regression.py             # expect: 95/95 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
@@ -25,6 +25,8 @@ python3 selfcheck.py                 # expect: exit 0 on a configured install
 | `tests/_restore_defaults_app.py` | pressing **Restore defaults** on the Grading rules tab, and failing unless the controls themselves come back — none of them carries a Streamlit `key`, so widget identity comes from each one's own arguments, which is a property of the framework and has to be exercised through it |
 | `tests/test_roster_edit.py` | permanent student ids: that they survive a re-upload and a corrected name, that migrating a positional survey grades identically and leaves nothing double-counted, that an old link resolves to its own student and a renumbered seat resolves to nobody, and that each edit discards only the answers that stopped applying |
 | `tests/_roster_edit_app.py` | adding, moving and removing students in the real app, failing unless the confirmation appears before a costly edit and every other student's link is byte-for-byte unchanged afterwards |
+| `tests/test_email_editor.py` | that the email body is written with a toolbar rather than as HTML, that every send path previews the message rendered with a real student's details, that a placeholder nothing fills in is flagged, and that reminders carry the student's permanent id |
+| `tests/_email_editor_app.py` | the editor and its previews in the real app, run twice — with the toolbar package and without it, which is how every Streamlit Cloud deployment was configured |
 | `tests/_rerun_cost.py` | what one rerun costs in storage round trips, with a 40-student section loaded — the number that decides whether the app feels fast on a cloud store, and the one a local timing cannot see |
 
 ## 1a. Performance, measured rather than felt
@@ -92,7 +94,14 @@ a file-write on a hosted server (where the file would not survive a restart).
   back to a code path with a duplicate-widget-id bug in it that took the whole
   Results tab down (2.15.0). Tests enforce both; do not "tidy" them back out.
   `requirements-optional.txt` is for features the app *offers to install* — the
-  AI provider SDKs, the rich email editor — not for features it just offers.
+  AI provider SDKs — not for features it just offers.
+- **The same mistake has now been made three times**: the storage backends
+  (2.10.0), PyMuPDF (2.15.0) and `streamlit-quill` (2.16.1). The test
+  `test_selfcheck_requires_everything_requirements_txt_declares` keeps
+  `selfcheck.py` honest about the list, but it cannot tell you that a package
+  is in the wrong file. Before moving anything into
+  `requirements-optional.txt`, ask whether a hosted deployment would still
+  offer the feature — if it would, the package is core.
 - **`local` storage is for trying it out.** The files are encrypted, but they
   sit beside the app and a hosted restart can wipe them. Real student records
   belong in Microsoft 365, Dropbox or pCloud (`DEPLOYMENT.md`).

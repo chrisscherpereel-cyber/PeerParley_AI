@@ -215,6 +215,21 @@ A moved or newly added student whom nobody has evaluated appears in the results
 as **No data**, with their grade left at the team score — not as a low score,
 and not missing from the report.
 
+## Writing the emails
+
+Every message the app sends — the invitation, the reminder and the results
+email — is written with a formatting toolbar rather than as HTML, and each has a
+preview showing the message as one real student receives it, with their name,
+team and link filled in. The plain-text version a mail client without
+formatting would show is there too.
+
+The body that is stored and sent is still HTML, because that is what an email
+is; **Edit the HTML directly** is a checkbox for pasting in markup you already
+have. Placeholders — `{first_name}`, `{last_name}`, `{name}`, `{team}`,
+`{class}`, `{eval_no}`, `{link}` — are substituted per student, and any braced
+name that is *not* one of them is flagged above the send button, since it would
+otherwise reach every student exactly as typed.
+
 ## Privacy / storage
 
 Responses are written to the **same encrypted vault** as the rest of the app

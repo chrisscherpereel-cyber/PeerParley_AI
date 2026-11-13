@@ -687,7 +687,7 @@ def test_selfcheck_requires_everything_requirements_txt_declares():
     source = open(os.path.join(REPO, "selfcheck.py"), encoding="utf-8").read()
     block = source.split("REQUIRED = [", 1)[1].split("]", 1)[0]
     # The import name is not always the distribution name.
-    alias = {"fitz": "pymupdf"}
+    alias = {"fitz": "pymupdf", "streamlit_quill": "streamlit-quill"}
     checked = {alias.get(m, m) for m in re.findall(r'\("([\w.]+)"', block)}
     missing = declared - checked
     assert not missing, (

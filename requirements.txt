@@ -11,7 +11,7 @@
 # *fresh* install months from now and breaks it for a new user who changed
 # nothing. Raise them deliberately, after running the tests.
 #
-# Optional extras — the AI writer, the rich email editor — live in
+# Optional extras — the AI provider SDKs — live in
 # requirements-optional.txt. The app runs without any of them and says which
 # package is missing if you pick a feature that needs one.
 
@@ -37,6 +37,12 @@ dropbox>=11.36,<13     # Dropbox
 # this file, and a browser will not display a PDF in an iframe — so without
 # this package every hosted deployment loses the previews it advertises.
 PyMuPDF>=1.24,<2
+
+# The formatting toolbar for the body of every email the app sends. Core for
+# the same reason: it is offered to every user, Streamlit Community Cloud
+# installs only this file, and without it an instructor is handed the raw HTML
+# of the message instead of the message.
+streamlit-quill>=0.0.3,<1
 
 # Backs off and retries an AI request that was rate-limited or timed out.
 # Small, pure Python; without it a single rate limit becomes a failed draft.

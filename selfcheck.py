@@ -67,12 +67,12 @@ REQUIRED = [
     ("dropbox", "Dropbox storage"),
     ("fitz", "PyMuPDF — showing a report on screen without downloading it"),
     ("tenacity", "retrying an AI request that was rate-limited"),
+    ("streamlit_quill", "the formatting toolbar for email bodies"),
 ]
 OPTIONAL = [
     ("openai", "OpenAI / xAI / OpenRouter / a local model, for the AI writer"),
     ("anthropic", "Claude, for the AI writer"),
     ("google.genai", "Gemini, for the AI writer"),
-    ("streamlit_quill", "the rich email editor (a plain box is used without it)"),
 ]
 
 

@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.16.1 — write the email, not its HTML
+
+Reported: *"The email messages shown in the application should be WYSIWYG not
+HTML. And editable in WYSIWYG model."*
+
+The instructor was being shown the markup. Every email body was edited in a box
+headed **Body (HTML)** containing
+
+    Hi {first_name},<br><br>It's time for the peer evaluation for {class}…
+    <a href="{link}">Open my peer evaluation</a><br><br>
+
+A formatting toolbar existed, but almost nobody got it: `streamlit-quill` was
+listed in `requirements-optional.txt`, and Streamlit Community Cloud installs
+only `requirements.txt`, so every hosted deployment fell through to that raw
+textarea. **Third time for that mistake** — the storage backends in 2.10.0,
+PyMuPDF in 2.15.0, this — so the rule is now written down in `RELEASE.md`: a
+package any user-facing feature needs is a core requirement, and
+`requirements-optional.txt` is only for features the app offers to install.
+
+**Every email is now written as it will look**, with a toolbar trimmed to what
+survives a real mail client — bold, italic, underline, lists, links. The stored
+and sent body is still HTML, because that is what an email is; the instructor
+simply no longer writes it. **Edit the HTML directly** is a checkbox for anyone
+pasting in markup they already have.
+
+**Every message now has a preview, rendered.** The invitation and the reminder
+— the two messages a whole section actually receives — had none at all; the
+results email was the only rendered preview in the app. All three now show the
+message as one real student receives it, with their name, team and link filled
+in, plus the plain-text version a mail client without formatting would show. A
+link that is still a bare `?t=…` because the app's address was left blank now
+shows up here rather than in forty inboxes.
+
+**A mistyped placeholder is caught before sending.** `{firstname}` is not a
+placeholder PeerParley fills in, so it used to go out to every student exactly
+as written. Any braced name that nothing will substitute is now named above the
+send button, with the list of the ones that work.
+
+One bug found while reading the email code: **the reminder path was minting its
+own link tokens** from the student's team and position — the scheme 2.16.0
+replaced — instead of their permanent id. A reminder sent after any roster edit
+would have pointed at the wrong student, or at nobody. It now builds links with
+the same function the invitations use, and a student who is currently on no team
+is named rather than sent a link that cannot work.
+
+13 new tests (367 total), including a driver that runs the editor in the real
+app twice — with the toolbar package and without it, which is how every Cloud
+deployment was configured.
+
 ## 2.16.0 — teams you can edit
 
 Asked for: *"I would like to add the capability to easily add, move, and remove

@@ -38,6 +38,7 @@ from peerparley.config import load_config
 from peerparley import ingest
 from peerparley import survey
 from peerparley import roster_ui
+from peerparley import email_ui
 from peerparley import emailpack
 from peerparley import ai_ui
 from peerparley import setup_wizard
@@ -866,19 +867,13 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
 
 
 def _email_body(default_html, key, height=220):
-    """WYSIWYG email-body editor (Quill) that returns HTML. Falls back to a plain
-    HTML text box if the streamlit-quill component isn't available."""
-    st.caption("Formatting toolbar below. Placeholders like {first_name}, {team}, "
-               "{eval_no}, {class} and {link} are filled in per student when sent.")
-    try:
-        from streamlit_quill import st_quill
-        html = st_quill(value=st.session_state.get(f"{key}_html", default_html),
-                        html=True, key=key)
-        html = html if html else default_html
-        st.session_state[f"{key}_html"] = html
-        return html
-    except Exception:
-        return st.text_area("Body (HTML)", default_html, height=height, key=f"{key}_ta")
+    """The message body, written as it will look. See peerparley/email_ui.py.
+
+    Kept as a one-line shim because three tabs call it; the editor itself,
+    the rendered preview and the HTML escape hatch live in `email_ui` so all
+    three get the same thing.
+    """
+    return email_ui.body_editor(default_html, key, height=height)
 
 
 def _mailer_for(method):
@@ -1552,6 +1547,9 @@ with tabs[0]:
         subj = st.text_input("Email subject",
                              "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
         body = _email_body(DEFAULT_INVITE_BODY, key="inv_body")
+        email_ui.warn_unfilled(subj, body)
+        email_ui.preview(subj, body,
+                         email_ui.sample_ctx(course, eval_no, links))
         _link_delivery("inv", links, subj, body, course, eval_no, bool(base_url.strip()),
                        "Invitations")
 
@@ -1615,16 +1613,34 @@ with tabs[1]:
                 subj = st.text_input("Subject",
                                      "Reminder: your peer evaluation for {class}", key="rem_subj")
                 body = _email_body(DEFAULT_INVITE_BODY, key="rem_body", height=150)
-                from peerparley.tokens import make_token
-                _secret = survey.token_secret(cfg)
+                # Built by the same function that builds the invitations, so a
+                # reminder carries the student's permanent id exactly as their
+                # first link did. This used to mint its own token from team and
+                # position — the scheme 2.16.0 replaced — so a reminder sent
+                # after any roster edit pointed at the wrong student, or at
+                # nobody.
+                _by_name = {l["name"]: l for l in survey.student_links(
+                    base_url, slug, survey.saved_teams(vault_now(), slug),
+                    survey.token_secret(cfg))}
                 _recips = []
                 for r in nonresp:
-                    if not r["email"]:
+                    if not r["email"] or r.get("unassigned"):
                         continue
-                    _tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, _secret)
-                    _sep = "&" if "?" in base_url else "?"
-                    _recips.append({"name": r["name"], "email": r["email"], "team": r["team"],
-                                    "link": f"{base_url}{_sep}t={_tok}" if base_url else f"?t={_tok}"})
+                    _link = _by_name.get(r["name"], {}).get("link", "")
+                    _recips.append({"name": r["name"], "email": r["email"],
+                                    "team": r["team"], "link": _link})
+                _missing = [r["name"] for r in _recips if not r["link"]]
+                if _missing:
+                    st.warning(
+                        "No current link for " + ", ".join(_missing[:5])
+                        + ("…" if len(_missing) > 5 else "")
+                        + " — they are not on a team at the moment. Give them "
+                          "one under **👥 Teams** on tab ① and their link "
+                          "starts working.", icon="🔗")
+                    _recips = [r for r in _recips if r["link"]]
+                email_ui.warn_unfilled(subj, body)
+                email_ui.preview(subj, body,
+                                 email_ui.sample_ctx(course, eval_no, _recips))
                 _link_delivery("rem", _recips, subj, body, course, eval_no,
                                bool(base_url.strip()), "Reminders")
 
@@ -2035,12 +2051,12 @@ with tabs[4]:
         body_t = _email_body(default_body, key="results_body", height=200)
         attach_team = st.checkbox("Attach team-contribution PDF", value=True)
 
-        # live preview
+        # The same preview the invitation and reminder get: one real student's
+        # message, rendered. This used to be the only rendered preview in the
+        # app, and the two messages a whole section actually receives had none.
         sample = S["teams"][0].members[0]
-        ctx = _ctx(sample, course, eval_no)
-        with st.expander("Live preview"):
-            st.write("**Subject:** " + mail.render_template(subject_t, ctx))
-            st.markdown(mail.render_template(body_t, ctx), unsafe_allow_html=True)
+        email_ui.warn_unfilled(subject_t, body_t)
+        email_ui.preview(subject_t, body_t, _ctx(sample, course, eval_no))
 
         report = _report_settings(course, eval_no)
         _results_delivery("res", S["teams"], S.get("roster"), subject_t, body_t,

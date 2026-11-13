@@ -155,7 +155,7 @@ switch it on there. It is off every time you sign in, by design. Full guide:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/ -q     # 354 tests, fully offline
+python3 -m pytest tests/ -q     # 367 tests, fully offline
 python3 qa_regression.py        # 93 checks driving the real app, headless
 python3 selfcheck.py            # is this installation usable?
 ```
@@ -198,6 +198,7 @@ See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
 │   ├── vault.py               # M365 / Dropbox / pCloud / local backends
 │   ├── survey.py              # built-in survey: setup, links, collection
 │   ├── roster_ui.py           # the Teams editor: add / move / remove
+│   ├── email_ui.py            # email body editor + rendered previews
 │   ├── ingest.py              # Qualtrics + roster parsing, QA
 │   ├── comments.py            # comment-support score Q
 │   ├── grading.py             # allocation grading engine

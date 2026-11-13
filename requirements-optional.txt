@@ -12,13 +12,10 @@
 # to requirements.txt, since that is the only file the deploy installs.
 
 # ---- Convenience in the app ---------------------------------------------- #
-# NOTE: PyMuPDF used to live here. It is now in requirements.txt, because the
-# on-screen report previews are offered to every user and Streamlit Community
-# Cloud installs only that file. Do not move it back.
-#
-# A formatting toolbar for the email body. Without it you get a plain text box
-# that accepts the same HTML.
-streamlit-quill>=0.0.3,<1
+# NOTE: PyMuPDF and streamlit-quill both used to live here, and both are now
+# in requirements.txt — the report previews and the email formatting toolbar
+# are offered to every user, and Streamlit Community Cloud installs only that
+# file. Do not move either back.
 
 # ---- The AI feedback writer ---------------------------------------------- #
 # Optional feature, off by default, and off again every time you sign in.
