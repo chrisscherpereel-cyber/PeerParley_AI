@@ -37,6 +37,7 @@ from peerparley.auth import logout, require_login
 from peerparley.config import load_config
 from peerparley import ingest
 from peerparley import survey
+from peerparley import roster_ui
 from peerparley import emailpack
 from peerparley import ai_ui
 from peerparley import setup_wizard
@@ -1121,6 +1122,24 @@ with tabs[0]:
             st.warning(f"{len(no_email)} student(s) have no email and can't be sent a "
                        "link: " + ", ".join(no_email[:8]) + ("…" if len(no_email) > 8 else ""))
 
+    # ---- edit the saved teams -------------------------------------------------
+    # Only once a roster is saved: before that the contact list is the roster,
+    # and the thing to change is the spreadsheet. Afterwards the saved snapshot
+    # is what links and answers are attached to, so changing it is an edit
+    # rather than an upload — and until 2.16.0 there was no safe way to make
+    # one. Rosters are now keyed by permanent student ids, so there is.
+    if _is_saved:
+        _owner_now = survey.survey_owner(vault_now(), slug)
+        with st.expander("👥 Teams — add, move or remove a student",
+                         expanded=False):
+            st.caption("Changes here take effect immediately. Every student "
+                       "keeps the same personal link, and an edit that would "
+                       "affect answers already collected says so and asks "
+                       "first.")
+            roster_ui.render(
+                vault_now(), slug,
+                read_only=not survey.can_access(_owner_now, user))
+
     # ---- Already collected in Qualtrics? Upload the raw export instead -------
     with st.expander("Already have responses? Upload a Qualtrics / raw export - Optional - RARELY USED"):
         st.caption("Use this if you ran the evaluation in Qualtrics instead of the built-in "
@@ -1430,21 +1449,28 @@ with tabs[0]:
             f"leaves that list alone, so the links already sent keep working. "
             f"Upload a contact list above only if the list itself has changed.")
     if not _shift["safe"]:
-        st.error(
-            f"**Saving now would attach answers to the wrong students.** "
-            f"{_shift['responses']} submission(s) are already in for "
+        # This used to block the save outright, because re-saving renumbered
+        # students and handed their answers to a teammate. Identity is now a
+        # permanent id that survives the re-upload, so it is a caution rather
+        # than a stop: the upload will move people, but it moves them *without*
+        # the per-student confirmation the Teams editor gives.
+        st.warning(
+            f"**This contact list changes who is on "
+            f"{'a team' if len(_shift['teams']) == 1 else 'some teams'} that "
+            f"already has answers in.** {_shift['responses']} submission(s) are "
+            f"stored for "
             f"{'team' if len(_shift['teams']) == 1 else 'teams'} "
-            f"{', '.join(_shift['teams'])}, and this contact list changes who is "
-            f"on them or the order they are listed in. Each student's link points "
-            f"at their place in the saved list, so re-saving would hand their "
-            f"answers to a teammate. Use a new evaluation number for a changed "
-            f"roster, or put the list back the way it was.",
-            icon="🛑",
+            f"{', '.join(_shift['teams'])}. Everyone keeps their own link and "
+            f"their own answers — but a bulk upload will not tell you which "
+            f"answers stop applying, the way **👥 Teams** above does for one "
+            f"student at a time. For a change of one or two students, use that "
+            f"instead.",
+            icon="⚠️",
         )
     if st.button(("💾 Save these settings" if _config_only
                   else "💾 Save — and make the student links live"),
                  type="primary",
-                 disabled=((cdf is None and not _is_saved) or not _shift["safe"]),
+                 disabled=(cdf is None and not _is_saved),
                  help=("Writes the questions, the schedule and the report settings. "
                        "The saved student list is left as it is, so links already "
                        "sent keep working." if _config_only else

@@ -449,6 +449,14 @@ def compute(
                 contrib[k] = []; improve[k] = []
                 dims[k] = [[], [], [], []]; ranks_recv[k] = []
             authored.setdefault(e, [])
+            display_name.setdefault(k, r["evaluatee"])
+            if e == k:
+                # A presence row: the intake adds one for a student on a team
+                # that nobody has evaluated yet, so they are reported as "No
+                # data" rather than vanishing from the results. It establishes
+                # that they are on this team and must contribute nothing else —
+                # above all not a phantom teammate to the denominator below.
+                continue
             # Every teammate this student was asked about, whether or not they
             # wrote anything: the denominator for "the quality of the feedback
             # you wrote". Without it, skipping three teammates and writing one

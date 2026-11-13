@@ -169,15 +169,56 @@ exactly as before.
 ## How students submit
 
 Each link is `https://<your-app>/?t=<token>`. The token is a signed
-`{slug, team, position}`; the app detects it **before** the instructor password
-gate and shows that student their form — no login, and no student can edit the
-URL to reach anyone else (a bad signature is rejected). Students can reopen their
-link to revise until the survey is closed.
+`{slug, student id}`; the app detects it **before** the instructor password gate
+and shows that student their form — no login, and no student can edit the URL to
+reach anyone else (a bad signature is rejected). Students can reopen their link
+to revise until the survey is closed.
+
+The id is **permanent**, assigned the first time a student appears in a contact
+list and kept for as long as the survey exists. That is what lets the roster be
+edited after links have gone out: a student can be added, moved to another team
+or removed, and everyone else's link keeps opening their own form. A student who
+is moved follows the same link and finds their new teammates on it.
+
+Until 2.16.0 the token carried a team and a **position** instead — the student's
+index in their team's list — so adding one student named "Adams" renumbered
+everyone behind them and the links already sent pointed at the wrong people.
+Links issued under that scheme are still honoured, and a survey stored under it
+is migrated the first time it is opened.
+
+## Editing teams after the roster is saved
+
+**① Set up survey → 👥 Teams — add, move or remove a student.** Every team is
+listed with its members; each student has a *Move* (to any team, or to no team
+at all) and a *Remove*, and teams can be created, renamed and dissolved.
+
+An edit never silently changes a grade. The only answers it is allowed to
+discard are the ones that have stopped describing anything:
+
+| Edit | What goes | What stays |
+|---|---|---|
+| Move a student | What they wrote about the team they are leaving, and what that team wrote about them | Their own submission and self-evaluation; everything their old teammates wrote about each *other*; every link |
+| Remove a student | Their submission, and every reference to them | Everybody else's submissions and links |
+| Rename a team | Nothing | Everything; submissions are relabelled to the new name |
+| Dissolve a team | Nothing | Its students move to the no-team list and keep their submissions — put them on a team and they grade again |
+
+Any edit that would touch stored answers is shown first, in plain English and
+naming the students affected, and waits for a yes. An edit that costs nothing —
+the ordinary case before links go out — just happens.
+
+A student with no team stays on the roster rather than disappearing (they used
+to be dropped silently), and their link tells them there is nothing to fill in
+yet. A team with only one member is kept and flagged **not gradeable yet**
+rather than being dissolved, so a team can be built up one student at a time.
+
+A moved or newly added student whom nobody has evaluated appears in the results
+as **No data**, with their grade left at the team score — not as a low score,
+and not missing from the report.
 
 ## Privacy / storage
 
 Responses are written to the **same encrypted vault** as the rest of the app
-(`survey__<slug>.ppj`, `roster__<slug>.ppj`, `resp__<slug>__<team>__p<n>.ppj`),
+(`survey__<slug>.ppj`, `roster__<slug>.ppj`, `resp__<slug>__m<id>.ppj`),
 Fernet-encrypted before they leave the process. This matches the app's existing
 single-key model — simpler than a split-key scheme, and consistent with how the
 vault already protects PII.

@@ -79,27 +79,24 @@ class M365Backend:
         self.client_secret = opts["client_secret"]
         self.drive = opts.get("drive", "onedrive")
         self.site_id = opts.get("site_id", "")
-        self._app = None
+        self._token = None
 
     def _get_token(self) -> str:
-        # One MSAL client per backend, asked every time: MSAL serves the token
-        # from its own cache and renews it shortly before it expires. Keeping
-        # the raw token string forever (as this used to) breaks about an hour
-        # after start-up once a vault instance is shared across reruns.
+        if self._token:
+            return self._token
         import msal
-        if self._app is None:
-            self._app = msal.ConfidentialClientApplication(
-                self.client_id,
-                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
-                client_credential=self.client_secret,
-                timeout=20,
-            )
-        result = self._app.acquire_token_for_client(
+        app = msal.ConfidentialClientApplication(
+            self.client_id,
+            authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+            client_credential=self.client_secret,
+        )
+        result = app.acquire_token_for_client(
             scopes=["https://graph.microsoft.com/.default"]
         )
         if "access_token" not in result:
             raise RuntimeError(f"M365 auth failed: {result.get('error_description')}")
-        return result["access_token"]
+        self._token = result["access_token"]
+        return self._token
 
     def _drive_root(self) -> str:
         if self.drive == "sharepoint":
@@ -131,21 +128,12 @@ class M365Backend:
         return r.content
 
     def list(self) -> List[str]:
-        # Graph pages folder listings (about 200 items a page by default).
-        # Reading only the first page made responses beyond it invisible once a
-        # vault held a few courses' worth of files, so every page is followed.
-        url = (f"{self._drive_root()}/root:/{self.folder}:/children"
-               f"?$select=name&$top=999")
-        names: List[str] = []
-        while url:
-            r = requests.get(url, headers=self._headers(), timeout=60)
-            if r.status_code == 404:
-                return names
-            r.raise_for_status()
-            body = r.json()
-            names.extend(c["name"] for c in body.get("value", []))
-            url = body.get("@odata.nextLink")
-        return names
+        url = f"{self._drive_root()}/root:/{self.folder}:/children"
+        r = requests.get(url, headers=self._headers(), timeout=60)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        return [c["name"] for c in r.json().get("value", [])]
 
     def delete(self, name: str) -> None:
         url = f"{self._drive_root()}/root:/{self._item_path(name)}:"
@@ -191,11 +179,7 @@ class DropboxBackend:
     def list(self) -> List[str]:
         try:
             res = self.dbx.files_list_folder(self.folder)
-            names = [e.name for e in res.entries]
-            while res.has_more:     # follow every page, not just the first
-                res = self.dbx.files_list_folder_continue(res.cursor)
-                names.extend(e.name for e in res.entries)
-            return names
+            return [e.name for e in res.entries]
         except Exception:
             return []
 

@@ -27,10 +27,11 @@ Three things are worth knowing before you click:
 * **Save the survey before you email anybody.** Until you do, a student opening
   their link is told the evaluation is not available. The app blocks sending
   until then, and tells you.
-* **Don't change the student list after answers start arriving.** Each link
-  points at a student's place in the saved list, so adding or removing someone
-  would hand their answers to a teammate. PeerParley refuses the save and says
-  so; use a new evaluation number for a changed roster.
+* **You can change the teams after answers start arriving.** Every student
+  carries a permanent id, so adding, moving or removing one leaves everybody
+  else's link and answers exactly as they were. Use **👥 Teams** on the first
+  tab; any edit that would affect answers already collected says what it would
+  discard and asks first.
 * **Nothing reaches a student until you click a button that says it will.**
   Every send button names its audience and how many; the ones that discard work
   ask first. The AI writer, if you turn it on, drafts for your review and
@@ -46,6 +47,9 @@ One app, five steps (tabs), plus Compare and Vault:
    builds a private evaluation link for every student; their answers become the
    grading input directly. Download the built-in contact-list template and fill
    the yellow cells only. (Optional: import a Qualtrics raw export instead.)
+   **👥 Teams** then lets you add, move and remove students, and create, rename
+   or dissolve teams, at any point — links keep working, and an edit that would
+   affect answers already in tells you what it would discard first.
 2. **Collect responses** — watch who has responded, send reminders, then load
    the responses into grading.
 3. **Grading rules** — sensitivity, separate increase/decrease caps, feedback
@@ -151,7 +155,7 @@ switch it on there. It is off every time you sign in, by design. Full guide:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/ -q     # 317 tests, fully offline
+python3 -m pytest tests/ -q     # 354 tests, fully offline
 python3 qa_regression.py        # 93 checks driving the real app, headless
 python3 selfcheck.py            # is this installation usable?
 ```
@@ -193,6 +197,7 @@ See **`DEPLOYMENT.md`** — push this repo to GitHub, point Streamlit Cloud at
 │   ├── security.py            # Fernet encryption
 │   ├── vault.py               # M365 / Dropbox / pCloud / local backends
 │   ├── survey.py              # built-in survey: setup, links, collection
+│   ├── roster_ui.py           # the Teams editor: add / move / remove
 │   ├── ingest.py              # Qualtrics + roster parsing, QA
 │   ├── comments.py            # comment-support score Q
 │   ├── grading.py             # allocation grading engine

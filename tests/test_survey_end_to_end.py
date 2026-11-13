@@ -157,13 +157,17 @@ def test_every_student_gets_a_link_that_resolves_to_them(vault):
     slug, teams, links = set_up(vault)
     assert len(links) == len(ROSTER)
     secret = survey.token_secret()
+    snap = survey.load_roster_snapshot(vault, slug)
     for link in links:
         token = link["link"].split("t=", 1)[1]
         payload = read_token(token, secret)
-        assert payload == {"s": slug, "t": link["team"], "p": link["pos"]}
-        # The position in the token is the position in the SAVED roster, which
-        # is what makes re-saving a changed roster dangerous.
-        assert teams[TEAM][payload["p"]]["name"] == link["name"]
+        # The token carries the student's permanent id, not a seat on a team.
+        # That is what lets the roster be edited after links go out: a position
+        # moves when anyone is added or removed, an id never does.
+        assert payload == {"s": slug, "i": link["id"]}
+        assert survey.resolve_token(payload, snap) == link["id"]
+        assert survey.member_by_id(snap, link["id"])["name"] == link["name"]
+        assert teams[TEAM][link["pos"]]["name"] == link["name"]
 
 
 def test_a_tampered_or_foreign_token_opens_nothing(vault):

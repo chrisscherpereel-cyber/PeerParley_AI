@@ -1,27 +1,87 @@
 # Changelog
 
-## 2.15.2 — Microsoft 365 storage: every file, and a token that renews
+## 2.16.0 — teams you can edit
 
-Two latent defects in the Microsoft 365 storage backend, found while porting
-PeerParley's storage work to TeamForge.
+Asked for: *"I would like to add the capability to easily add, move, and remove
+students from peer evaluation teams in this application."*
 
-**Only the first page of a folder was ever listed.** Graph returns a folder's
-contents a page at a time (about 200 items by default) and the backend read the
-first page only. A vault holding several courses' surveys, rosters, responses
-and drafts passes that quickly, after which responses beyond the first page
-were simply invisible — not counted, not graded, with no error anywhere. The
-listing now asks for large pages and follows `@odata.nextLink` to the end.
-Dropbox had the same shape (`has_more` was ignored) and is fixed the same way.
+Editing a saved roster was the one thing PeerParley warned an instructor off
+doing, and the warning was right. A student was identified by their **position**
+— their index in their team's list in the stored snapshot — and that is what
+the link token carried and what the answers inside a submission referred to.
+Add a student named "Adams" to a team and everyone behind them shifted by one:
+the links already in students' inboxes opened the wrong students' forms, and the
+stored answers described the wrong students. Nothing errored. The grades were
+simply wrong, so the save was blocked and the advice was to start a new
+evaluation number.
 
-**The sign-in token was kept forever.** The backend fetched one Graph token and
-reused the string for the life of the object. Since 2.9.0 one vault is shared
-for the whole server process, and a Graph token expires after about an hour, so
-a deployment that stayed up began failing every storage call. The backend now
-keeps one MSAL client and asks it for a token each time; MSAL serves it from its
-own cache and renews it before it expires. The MSAL client is also bounded to a
-twenty-second wait.
+**Every student now has a permanent id.** It is assigned the first time they
+appear in a contact list, it is what their link carries and what their
+submission is filed under, and it is what the answers inside a submission refer
+to. Positions are presentational. So a student can be added, moved between
+teams or removed and nobody else is disturbed: every other link keeps opening
+its own student's form, and every other answer keeps meaning what it meant. A
+moved student follows the same link and finds their new teammates on it.
 
-3 new tests (`tests/test_storage_paging.py`).
+The id is random rather than derived from the name or the email, because every
+derivable thing about a student is also a thing an instructor fixes. Ids are
+*matched* onto later uploads of the contact list by name, falling back to email,
+so correcting a misspelt surname keeps that student their id and their answers
+instead of minting a new student.
+
+**👥 Teams — add, move or remove a student**, on the Set up survey tab. Every
+team with its members, a Move and a Remove per student, add a student, and
+create, rename or dissolve a team.
+
+**An edit only ever discards answers that stopped describing anything.** Moving
+a student clears what they wrote about the team they are leaving and what that
+team wrote about them; it keeps their own self-evaluation, everything their old
+teammates wrote about each *other*, and every link. Removing a student deletes
+their submission and every reference to them. Any edit that would touch stored
+answers is shown first, in plain English and naming the students affected, and
+waits for a yes — and an edit that costs nothing, the ordinary case before links
+go out, just happens.
+
+**Nobody is dropped silently any more.** A student with no team used to vanish
+from the app entirely, as did a team with only one member, so an instructor
+fixing a blank Team cell had no way to see who needed one. Both now stay on the
+roster: the editor flags the team as *not gradeable yet*, and the student's own
+link tells them there is nothing to fill in yet rather than handing them a form
+with only themselves on it. That also means a team can be built up one student
+at a time, which the first cut of this could not do — it dissolved any team
+below two members, so the team disappeared under you before the second student
+arrived.
+
+**A student nobody has evaluated is listed as "No data", not dropped.** A
+student who has just been moved, or just been added, has no answers about them
+at all, and not one row of the grading input mentioned them — so they fell out
+of the results entirely. They now appear with their grade at the team score,
+which is what the instructor needs to see.
+
+**Existing surveys migrate on sight.** A roster stored under the positional
+scheme gets ids assigned and its submissions rewritten — the answers inside each
+one re-keyed from the teammate's index to the teammate's id — the first time it
+is opened. It is idempotent, it grades identically before and after (a test
+compares the whole results table), and links issued under the old scheme still
+resolve, each to the student it was issued to. An old link whose seat has since
+been renumbered resolves to *nobody* rather than to whoever is standing there
+now: that is the failure the ids exist to prevent, and the compatibility path
+does not reintroduce it.
+
+One bug found while building it, which would have doubled grades: both naming
+schemes share the `resp__<slug>__` prefix that the response listing reads, so a
+migrated submission left in its old place was counted **twice** — every student
+appeared to have been rated by twice as many teammates as they had. Migration
+now retires the old object, and the response count decides from the names alone
+so the hot path still costs one listing and no fetches.
+
+Re-uploading a changed contact list is no longer blocked, since it can no longer
+misattribute anything. It is a caution instead: a bulk upload moves people
+without the per-student confirmation the editor gives.
+
+39 new tests (354 total), plus a driver that adds, moves and removes students in
+the real app and fails unless every other student's link is byte-for-byte
+unchanged.
 
 ## 2.15.1 — the self-evaluation gap, the ranking that was read a tier low
 
