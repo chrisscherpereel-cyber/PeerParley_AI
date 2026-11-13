@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.17.1 — team edits that stick, and a new survey that starts empty
+
+Reported: *"when I save and make links live the changes I made to teams do not
+take (it goes back to the original teams from the spreadsheet). Also when I
+create a new survey it keeps the existing uploaded teams spreadsheet and that
+should be blank for a new survey."*
+
+**One cause for both: the spreadsheet never left the uploader.** After the
+first save it stayed there, so every later press of *Save — and make the
+student links live* rebuilt the teams from the file — keeping everyone's link,
+but undoing every move, addition and removal made under **👥 Teams**. And the
+uploader kept the same identity when the instructor moved to another survey,
+so a new survey opened with the previous one's spreadsheet already in it.
+
+Streamlit has no way to clear a file uploader except to give it a new key, so
+the key now carries a generation number that moves on at the two moments the
+uploader should be empty:
+
+- **after a spreadsheet is saved** — the stored roster is the list from then
+  on, later saves keep the teams exactly as edited, and the confirmation says
+  so;
+- **when the instructor switches to a different survey** — the new one starts
+  blank, and cannot be saved until its own list is uploaded.
+
+Re-uploading a corrected spreadsheet over a saved roster is still allowed — it
+is how a fixed list gets in — but the page now says, before the button, that
+saving will replace the saved teams *including* changes made under 👥 Teams,
+and how to keep them instead.
+
+Also fixed while there: the "Saved" confirmation was never visible. It was
+shown and the page refreshed in the same moment, so it vanished. It now
+survives the refresh.
+
+1 new test (428 total), driving the real file uploader: upload, save, edit the
+teams, save again, then start a new survey.
+
 ## 2.17.0 — release audit
 
 Asked for: a complete audit and clean for first release, with very low crash

@@ -1,6 +1,6 @@
 # Release checklist
 
-What was validated before 2.17.0, and what to re-run before any future
+What was validated before 2.17.1, and what to re-run before any future
 release. Everything here is a command, so the answer is never a matter of
 opinion.
 
@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 427 passed
+python3 -m pytest tests/ -q          # expect: 428 passed
 python3 qa_regression.py             # expect: 95/95 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
@@ -49,6 +49,7 @@ environment and a clean install of `requirements.txt` (which pulled Streamlit
 | `tests/_student_form_app.py` | the public student page, opened with every kind of link a student can arrive with — fresh, pre-2.16.0, tampered, garbage, for a survey that does not exist, for a student since moved or removed, for a closed or not-yet-open evaluation — and filled in and submitted where it should be |
 | `tests/_fuzz_inputs.py` | thirty malformed and awkward contact lists and Qualtrics exports through every path an upload takes, to the PDFs: a bad file may produce a message, never a traceback |
 | `tests/test_accounts_and_reports.py` | instructor accounts (sign-in, wrong and short passwords, reset, deactivate, remove, reserved names, salted hashes, no published default password), the team and comparison PDFs, and that the setup screen can never hand out a replacement encryption key |
+| `tests/_save_after_edit_app.py` | through the real file uploader: that once a spreadsheet is saved it leaves the uploader, so saving again keeps every move, addition and removal made under 👥 Teams; and that a new survey starts with an empty uploader |
 | `tests/_compare_app.py` | the Compare tab with three real rounds — a student who changes team, one who joins late, one written "Last, First" — and that the comparison is built once, not on every click |
 | `tests/_rerun_cost.py` | what one rerun costs in storage round trips, with a 40-student section loaded — the number that decides whether the app feels fast on a cloud store, and the one a local timing cannot see |
 

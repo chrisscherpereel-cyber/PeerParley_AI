@@ -579,8 +579,13 @@ with st.sidebar:
                    ai_ui.FP_KEY, ai_ui.LOADED_KEY, "ai_reports",
                    # The survey config on screen belongs to the survey being
                    # left; the new one's saved settings are loaded instead.
-                   "survey_cfg", "_cfg_loaded_for"):
+                   "survey_cfg", "_cfg_loaded_for",
+                   # The uploaded spreadsheet belongs to the survey being left
+                   # too. A new survey starts with an empty uploader.
+                   "survey_contact_sig", "survey_contact_error",
+                   "survey_contact_warnings", "_save_flash"):
             S.pop(_k, None)
+        S["_roster_upload_gen"] = S.get("_roster_upload_gen", 0) + 1
         S["_nav_token"] = S.get("_nav_token", 0) + 1
     S["_active_slug"] = _active_slug
 
@@ -1215,8 +1220,15 @@ with tabs[0]:
         st.caption("🟡 Tip: your contact list needs first name, last name, email, class, "
                    "section, and team for every student.")
 
-    contact_file = st.file_uploader("Contact list (CSV/XLSX)",
-                                    type=["csv", "xlsx", "xls"], key="survey_roster")
+    # The key carries a generation number so the uploader can be emptied —
+    # Streamlit offers no other way to clear a file_uploader. It is bumped
+    # after a spreadsheet is saved and when the instructor moves to another
+    # survey. Before, the file stayed put: every later Save rebuilt the teams
+    # from it, undoing every change made under 👥 Teams, and a new survey
+    # opened with the previous survey's spreadsheet already in it.
+    contact_file = st.file_uploader(
+        "Contact list (CSV/XLSX)", type=["csv", "xlsx", "xls"],
+        key=f"survey_roster_{S.get('_roster_upload_gen', 0)}")
     # Parsed once per file, not on every click. Streamlit hands the uploader's
     # file back on every rerun, and this used to re-read it each time — for a
     # workbook, a fresh openpyxl parse on every press of every button on every
@@ -1643,6 +1655,16 @@ with tabs[0]:
             f"instead.",
             icon="⚠️",
         )
+    # A deliberate re-upload over a saved roster is allowed — it is how a
+    # corrected spreadsheet gets in — but it replaces the saved teams wholesale,
+    # edits included. Said before the button, not discovered after it.
+    if cdf is not None and _is_saved:
+        st.info("Saving will **replace the saved teams with this spreadsheet** — "
+                "including any changes made under **👥 Teams**. Every student "
+                "keeps their link. To keep the teams as they are, remove the "
+                "file from the uploader (✕) and save.", icon="📄")
+    if S.get("_save_flash"):
+        st.success(S.pop("_save_flash"), icon="✅")
     if st.button(("💾 Save these settings" if _config_only
                   else "💾 Save — and make the student links live"),
                  type="primary",
@@ -1662,22 +1684,35 @@ with tabs[0]:
                     sl, teams = survey.save_config(course, eval_no, cur,
                                                    vault_now())
                     nstud = sum(len(v) for v in teams.values())
-                    st.success(
+                    S["_save_flash"] = (
                         f"Saved. The questions, schedule and report settings are "
-                        f"updated for all {nstud} student(s); their links are "
-                        f"unchanged and still work.")
+                        f"updated for all {nstud} student(s); the teams are as "
+                        f"you left them and every link still works.")
                 else:
                     stamp = user["user"] if _own in (None, "") else None
                     sl, teams = survey.save_setup(course, eval_no, cdf, cur,
                                                   owner=stamp)
                     nstud = sum(len(v) for v in teams.values())
-                    st.success(f"Saved: {len(teams)} team(s), {nstud} student(s). The "
-                               f"student links are now live."
-                               + ("" if cfg.vault.backend != "local" else
-                                  " ⚠️ Storage is set to 'local', which means this "
-                                  "server's own disk — fine for trying things out, but "
-                                  "it can be wiped at any time. Use your university "
-                                  "storage before collecting real responses."))
+                    S["_save_flash"] = (
+                        f"Saved: {len(teams)} team(s), {nstud} student(s). The "
+                        f"student links are now live. From here on, change "
+                        f"teams under **👥 Teams** — the spreadsheet has been "
+                        f"set aside so that saving again cannot undo those "
+                        f"changes."
+                        + ("" if cfg.vault.backend != "local" else
+                           " ⚠️ Storage is set to 'local', which means this "
+                           "server's own disk — fine for trying things out, but "
+                           "it can be wiped at any time. Use your university "
+                           "storage before collecting real responses."))
+                    # The spreadsheet has done its job: the stored roster is
+                    # the list now. Empty the uploader, or the next press of
+                    # Save rebuilds the teams from the file and throws away
+                    # every move, addition and removal made since.
+                    S["_roster_upload_gen"] = S.get("_roster_upload_gen", 0) + 1
+                    for _k in ("survey_contact_df", "survey_contact_sig",
+                               "survey_contact_warnings", "survey_contact_error"):
+                        S.pop(_k, None)
+                    vault_now().refresh()
                 st.rerun()
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Could not save: {exc}")

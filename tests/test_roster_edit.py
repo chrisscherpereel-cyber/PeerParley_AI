@@ -613,3 +613,27 @@ def test_the_editor_works_in_the_real_app(tmp_path):
                  "PASS - nobody else's link moved",
                  "PASS - their submission is gone"):
         assert line in done.stdout, done.stdout[-5000:]
+
+
+def test_team_edits_survive_save_and_a_new_survey_starts_empty(tmp_path):
+    """Reported: saving after editing teams put the spreadsheet's teams back,
+    and a new survey opened with the previous one's spreadsheet in it.
+
+    One cause: the spreadsheet stayed in the uploader. Every later Save rebuilt
+    the teams from it — undoing every move, addition and removal — and the
+    uploader kept the same key across surveys. It is emptied now after a
+    spreadsheet is saved and on every switch of survey. Driven through the real
+    file uploader by tests/_save_after_edit_app.py.
+    """
+    done = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", "_save_after_edit_app.py"),
+         str(tmp_path / "save")],
+        capture_output=True, text=True, timeout=900, cwd=REPO)
+    assert "FAILURES: none" in done.stdout, done.stdout[-5000:]
+    assert done.returncode == 0, done.stdout[-5000:]
+    for line in ("PASS - after saving, the spreadsheet no longer sits in the uploader",
+                 "PASS - the move survives the save",
+                 "PASS - the added student survives the save",
+                 "PASS - the removed student stays removed",
+                 "PASS - the new survey's uploader is empty"):
+        assert line in done.stdout, done.stdout[-5000:]
