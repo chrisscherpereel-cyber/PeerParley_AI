@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.15.2 — Microsoft 365 storage: every file, and a token that renews
+
+Two latent defects in the Microsoft 365 storage backend, found while porting
+PeerParley's storage work to TeamForge.
+
+**Only the first page of a folder was ever listed.** Graph returns a folder's
+contents a page at a time (about 200 items by default) and the backend read the
+first page only. A vault holding several courses' surveys, rosters, responses
+and drafts passes that quickly, after which responses beyond the first page
+were simply invisible — not counted, not graded, with no error anywhere. The
+listing now asks for large pages and follows `@odata.nextLink` to the end.
+Dropbox had the same shape (`has_more` was ignored) and is fixed the same way.
+
+**The sign-in token was kept forever.** The backend fetched one Graph token and
+reused the string for the life of the object. Since 2.9.0 one vault is shared
+for the whole server process, and a Graph token expires after about an hour, so
+a deployment that stayed up began failing every storage call. The backend now
+keeps one MSAL client and asks it for a token each time; MSAL serves it from its
+own cache and renews it before it expires. The MSAL client is also bounded to a
+twenty-second wait.
+
+3 new tests (`tests/test_storage_paging.py`).
+
 ## 2.15.1 — the self-evaluation gap, the ranking that was read a tier low
 
 Four changes asked for after 2.15.0, all in the instructor summary and the
