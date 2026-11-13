@@ -1,0 +1,40 @@
+# ── Secrets — NEVER commit ────────────────────────────────────────────────
+# Fernet key, app password hash, M365 / Dropbox / pCloud vault credentials,
+# AI provider keys. The setup screen writes this file on a local install.
+.streamlit/secrets.toml
+.env
+
+# ── Encrypted student data (the "behind the firewall" cache) ──────────────
+# The local vault backend writes here: accounts, surveys, roster snapshots,
+# responses, AI drafts and workspaces. Encrypted, but still student records.
+vault_cache/
+# encrypted dataset bundles
+*.ppx
+# accounts / survey / roster / response / draft blobs
+*.ppj
+
+# ── Raw student data & generated deliverables ─────────────────────────────
+# Qualtrics exports, contact lists, feedback PDFs, email packs.
+*.csv
+*.xlsx
+*.xls
+*.pdf
+*.zip
+*.eml
+
+# ── Python / tooling ──────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# ── OS cruft ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Keep these (explicitly NOT ignored) ───────────────────────────────────
+!.streamlit/config.toml
+!.streamlit/secrets.toml.example
+!assets/ContactList_Template.xlsx
+!requirements*.txt
