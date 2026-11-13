@@ -1,6 +1,6 @@
 # Release checklist
 
-What was validated before 2.16.1, and what to re-run before any future
+What was validated before 2.17.0, and what to re-run before any future
 release. Everything here is a command, so the answer is never a matter of
 opinion.
 
@@ -8,10 +8,25 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 367 passed
+python3 -m pytest tests/ -q          # expect: 427 passed
 python3 qa_regression.py             # expect: 95/95 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
+
+### 1b. The release gate — before tagging, not on every commit
+
+```bash
+python3 tests/_every_state_app.py /tmp/ppstate   # ~4 min; expect FAILURES: none
+```
+
+The full crash matrix: seven states an instructor can reach, and in each one
+every button pressed, every checkbox and toggle switched on, and every option
+of every dropdown chosen — each from a freshly restored copy of the same data,
+so one press cannot leak into the next. The suite runs the two richest states
+of it on every commit; this runs all seven. At 2.17.0: 320 renders, 67 buttons,
+51 checkboxes and toggles, 168 dropdown choices, no failures, on both the dev
+environment and a clean install of `requirements.txt` (which pulled Streamlit
+1.67 and pandas 3.1, newer than the dev environment).
 
 | Suite | What it proves |
 |---|---|
@@ -27,6 +42,14 @@ python3 selfcheck.py                 # expect: exit 0 on a configured install
 | `tests/_roster_edit_app.py` | adding, moving and removing students in the real app, failing unless the confirmation appears before a costly edit and every other student's link is byte-for-byte unchanged afterwards |
 | `tests/test_email_editor.py` | that the email body is written with a toolbar rather than as HTML, that every send path previews the message rendered with a real student's details, that a placeholder nothing fills in is flagged, and that reminders carry the student's permanent id |
 | `tests/_email_editor_app.py` | the editor and its previews in the real app, run twice — with the toolbar package and without it, which is how every Streamlit Cloud deployment was configured |
+| `tests/test_release_hygiene.py` | pyflakes over the whole tree; that every stateful widget inside a function carries a key (the duplicate-id class, which has reached a release twice); that every `icon=` is one Streamlit accepts (an invalid one shipped in the AI writer); and that every module compiles |
+| `tests/test_contact_lists.py` | contact lists, including `assets/ContactList_Template.xlsx` as shipped and as Excel saves it once filled in; the formats spreadsheets really save in (cp1252, UTF-16, semicolons, a roster on sheet 2); that a missing value is never a student called "nan"; that team labels read "1", not "1.0"; and that the team column is never a count or a member column |
+| `tests/test_crash_matrix.py` | runs the crash matrix (two richest states), the student-form matrix, and the upload fuzz from the suite |
+| `tests/_every_state_app.py` | the full crash matrix described in §1b |
+| `tests/_student_form_app.py` | the public student page, opened with every kind of link a student can arrive with — fresh, pre-2.16.0, tampered, garbage, for a survey that does not exist, for a student since moved or removed, for a closed or not-yet-open evaluation — and filled in and submitted where it should be |
+| `tests/_fuzz_inputs.py` | thirty malformed and awkward contact lists and Qualtrics exports through every path an upload takes, to the PDFs: a bad file may produce a message, never a traceback |
+| `tests/test_accounts_and_reports.py` | instructor accounts (sign-in, wrong and short passwords, reset, deactivate, remove, reserved names, salted hashes, no published default password), the team and comparison PDFs, and that the setup screen can never hand out a replacement encryption key |
+| `tests/_compare_app.py` | the Compare tab with three real rounds — a student who changes team, one who joins late, one written "Last, First" — and that the comparison is built once, not on every click |
 | `tests/_rerun_cost.py` | what one rerun costs in storage round trips, with a 40-student section loaded — the number that decides whether the app feels fast on a cloud store, and the one a local timing cannot see |
 
 ## 1a. Performance, measured rather than felt
@@ -41,6 +64,32 @@ fast a function is but how much work a rerun repeats. The number that matters is
 365 or Dropbox each is an HTTPS request of 100–300ms. One rerun of a 40-student
 section cost 52 of them before 2.12.0 and costs 0 now. If a change makes the app
 feel slow again, run this first.
+
+## 1c. Every advertised feature, and what proves it
+
+| Feature (README) | Proved by |
+|---|---|
+| Contact list upload, incl. the shipped template | `test_contact_lists.py`, `_fuzz_inputs.py`, `test_survey_end_to_end.py` |
+| Personal links, signed and permanent | `test_survey_end_to_end.py`, `test_roster_edit.py`, `_student_form_app.py` |
+| Teams editor: add, move, remove, rename, dissolve | `test_roster_edit.py`, `_roster_edit_app.py`, matrix state G |
+| Qualtrics import | `qa_regression.py`, `_fuzz_inputs.py`, matrix state E |
+| Response status, reminders, load into grading | matrix states B–C, `test_email_editor.py` |
+| Grading rules, restore defaults | `test_metrics.py`, `test_results_reports.py`, `_restore_defaults_app.py` |
+| Results table, column help, previews | `test_results_reports.py`, `_results_tab_app.py` |
+| Instructor summary, confidential, student, team, comparison PDFs | `test_results_reports.py`, `test_accounts_and_reports.py`, `qa_regression.py` |
+| AI feedback writer | `test_feedback_ai.py`, `qa_regression.py` |
+| Email: editor, previews, every delivery method | `test_email_editor.py`, `_email_editor_app.py`, `test_delivery_and_clock.py`, matrix (every method on every panel) |
+| Compare | `_compare_app.py`, `test_accounts_and_reports.py` |
+| Vault save / resume | `qa_regression.py` |
+| Survey deletion | `_delete_survey_app.py` |
+| Instructor accounts | `test_accounts_and_reports.py` |
+| First-run setup, storage problems | `test_first_run.py`, `_missing_backend_app.py`, `_slow_storage_app.py` |
+| The student form | `_student_form_app.py`, `test_survey_end_to_end.py` |
+
+What cannot be proved offline: delivery through a real Microsoft 365 tenant or
+SMTP server, and a real AI provider. Both are exercised against fakes, and with
+nothing configured the matrix presses every send button and requires a message
+rather than a traceback.
 
 ## 2. The install path a new user takes
 

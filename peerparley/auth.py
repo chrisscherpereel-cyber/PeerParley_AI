@@ -40,10 +40,10 @@ def require_login() -> bool:
         return False
 
     with st.form("pp_login", clear_on_submit=False):
-        username = st.text_input("Username", value="",
+        username = st.text_input("Username", value="", key="pp_login_user",
                                  placeholder="your username")
-        pw = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign in")
+        pw = st.text_input("Password", type="password", key="pp_login_pw")
+        submitted = st.form_submit_button("Sign in")  # unique: one form per run
 
     if submitted:
         u = accounts.authenticate(username, pw, cfg)
@@ -61,9 +61,9 @@ def _force_password_change(user) -> bool:
     st.subheader("Choose your password")
     st.info(f"Welcome, {user.get('name')}. You signed in with a temporary password — "
             "pick your own before continuing. Nobody else will know it.")
-    n1 = st.text_input("New password", type="password")
-    n2 = st.text_input("Confirm", type="password")
-    if st.button("Set password", type="primary"):
+    n1 = st.text_input("New password", type="password", key="pp_newpw1")
+    n2 = st.text_input("Confirm", type="password", key="pp_newpw2")
+    if st.button("Set password", type="primary", key="pp_setpw"):
         if n1 != n2:
             st.error("Those don't match.")
         elif len(n1) < 8:
@@ -76,7 +76,7 @@ def _force_password_change(user) -> bool:
                 st.rerun()
             except Exception as exc:  # noqa: BLE001
                 st.error(str(exc))
-    if st.button("Sign out"):
+    if st.button("Sign out", key="pp_forcepw_signout"):
         logout(); st.rerun()
     return False
 

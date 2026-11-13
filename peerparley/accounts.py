@@ -32,6 +32,33 @@ _PBKDF2_ROUNDS = 200_000
 # --------------------------------------------------------------------------- #
 # Password hashing
 # --------------------------------------------------------------------------- #
+# Matches what the app already asked of an instructor changing their own
+# password. Enforced here as well, because the account panel used to accept any
+# temporary password an admin typed — including none at all.
+MIN_PASSWORD = 8
+
+
+def new_temp_password() -> str:
+    """A one-off temporary password for a new account or a reset.
+
+    These used to be the fixed string "PeerParley-Welcome", in every new
+    account and every reset — and that string is in the source of a public
+    repository. `must_change` only forces a new password *after* signing in, so
+    anyone who knew an instructor's username could sign in first with the
+    published password, set their own, lock the instructor out and read their
+    students' records. A random one, shown once to the admin who made it,
+    keeps the same hand-over with nothing anyone else can know.
+    """
+    import secrets as _secrets
+    return _secrets.token_urlsafe(9)        # 12 characters, ~72 bits
+
+
+def check_password(password: str) -> None:
+    """Raise ValueError, in plain English, for a password not worth keeping."""
+    if len(password or "") < MIN_PASSWORD:
+        raise ValueError(f"Use at least {MIN_PASSWORD} characters.")
+
+
 def hash_password(password: str, salt: Optional[str] = None) -> Dict[str, str]:
     salt = salt or os.urandom(16).hex()
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
@@ -106,6 +133,7 @@ def add_account(username: str, name: str, role: str, password: str,
         raise ValueError("Username is required.")
     if username == "admin":
         raise ValueError("'admin' is reserved for the break-glass account.")
+    check_password(password)
     vault = vault or Vault()
     accounts = load_accounts(vault)
     if username in accounts:
@@ -119,6 +147,7 @@ def add_account(username: str, name: str, role: str, password: str,
 
 def set_password(username: str, password: str, vault: Optional[Vault] = None,
                  must_change: bool = False) -> None:
+    check_password(password)
     vault = vault or Vault()
     accounts = load_accounts(vault)
     if username not in accounts:

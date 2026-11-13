@@ -205,6 +205,77 @@ def _instructor_pdf(which: str, sig: str, course: str, eval_no: str,
     return pdfgen.build_section_summary_pdf(_teams, course, eval_no)
 
 
+def _build_comparison(course, picks, settings, sig) -> dict:
+    """Everything the Compare tab shows, built once per press of its button.
+
+    Students are matched across rounds by name key, not by the name as typed,
+    so "Ann Apple" in one round and "Apple, Ann" in the next are one row
+    rather than two. The spelling shown is the most recent round's.
+    """
+    vault = vault_now()
+    evals = []
+    for en in picks:
+        slug = survey.slugify(course, en)
+        ld = survey.responses_to_long(vault, slug)
+        if ld.empty:
+            continue
+        se = survey.self_evaluations(vault, slug)
+        evals.append((en, graded(ld, settings, se)))
+
+    by_eval, team_of, shown = {}, {}, {}
+    for en, tr in evals:
+        by_eval[en] = {}
+        for t in tr:
+            for m in t.members:
+                k = ingest.name_key(m.name) or m.name
+                by_eval[en][k] = m
+                team_of[k] = t.team          # latest round wins
+                shown[k] = m.name
+    order = sorted(shown, key=lambda k: (str(team_of.get(k, "")),
+                                         shown[k].lower()))
+    rows = []
+    for k in order:
+        row = {"Team": team_of.get(k, ""), "Student": shown[k]}
+        for en, _ in evals:
+            m = by_eval[en].get(k)
+            row[f"E{en} Score"] = m.individual_score if m else None
+            row[f"E{en} Δ%"] = m.signed_pct if m else None
+            row[f"E{en} Perf"] = m.performance if m else ""
+        rows.append(row)
+
+    teams = sorted({team_of[k] for k in order}, key=str)
+    charts = {}
+    for team in teams:
+        data = []
+        for en, _ in evals:
+            d = {"Eval": f"Eval {en}"}
+            for k in order:
+                if team_of.get(k) == team:
+                    m = by_eval[en].get(k)
+                    d[shown[k]] = m.individual_score if m else None
+            data.append(d)
+        charts[team] = pd.DataFrame(data).set_index("Eval")
+    return {"sig": sig, "evals": evals, "df": pd.DataFrame(rows),
+            "teams": teams, "charts": charts,
+            "pdf": pdfgen.build_comparison_pdf(course, evals) if evals else b""}
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _contact_teams(_cdf: pd.DataFrame, sig: str) -> dict:
+    """The teams preview for an uploaded contact list, built once per file.
+
+    `sig` is the uploaded file's name and size and stands in for the frame in
+    the cache key (Streamlit skips underscore-prefixed arguments). Without it
+    the preview was rebuilt on every click while the file sat in the uploader.
+    """
+    try:
+        return survey.build_teams(_cdf)
+    except Exception:  # noqa: BLE001
+        # contact_list_problems has already vetted the columns; anything still
+        # wrong here is reported as "no teams", which the page explains.
+        return {}
+
+
 @st.cache_data(ttl=30, show_spinner=False, max_entries=8)
 def _response_status(slug: str) -> list:
     """Who has answered, read at most once every 30 seconds.
@@ -523,35 +594,79 @@ with st.sidebar:
             nu = st.text_input("Username", key="acct_new_user")
             nn = st.text_input("Display name", key="acct_new_name")
             nr = st.selectbox("Role", ["instructor", "admin"], key="acct_new_role")
-            npw = st.text_input("Temporary password", value="PeerParley-Welcome",
-                                key="acct_new_pw")
+            npw = st.text_input(
+                "Temporary password (optional)", key="acct_new_pw",
+                type="password",
+                placeholder="Leave blank and one is generated",
+                help=f"At least {accounts.MIN_PASSWORD} characters. Leave it "
+                     "blank and PeerParley makes a random one and shows it to "
+                     "you once. They choose their own at first sign-in.")
             if st.button("Add instructor", key="acct_add"):
+                _temp = npw or accounts.new_temp_password()
                 try:
-                    accounts.add_account(nu, nn, nr, npw or "PeerParley-Welcome")
-                    st.success(f"Added `{nu}`. Give them username `{nu}` and password "
-                               f"`{npw or 'PeerParley-Welcome'}` — they'll set their own "
-                               "on first sign-in.")
+                    accounts.add_account(nu, nn, nr, _temp)
+                    st.success(f"Added `{nu}`. Give them username `{nu}` and the "
+                               f"temporary password below — it is shown this "
+                               f"once, and they choose their own at first "
+                               f"sign-in.")
+                    if not npw:
+                        st.code(_temp, language=None)
                 except Exception as exc:  # noqa: BLE001
                     st.error(str(exc))
             if accts:
                 st.markdown("**Manage an account**")
                 who = st.selectbox("Account", list(accts), key="acct_pick")
+                # Acting on your own account from here — demoting, deactivating
+                # or removing yourself — locks you out of the panel you are
+                # standing in. Your own password is changed above.
+                _self = who == user.get("user")
+                if _self:
+                    st.caption("That is your own account. Change your password "
+                               "above; the rest is left to another admin.")
                 a1, a2 = st.columns(2)
-                if a1.button("Reset password", key="acct_reset"):
-                    accounts.set_password(who, "PeerParley-Welcome", must_change=True)
-                    st.success("Reset to `PeerParley-Welcome` (must change on next sign-in).")
-                if a2.button("Toggle admin/instructor", key="acct_role"):
-                    accounts.set_role(who, "instructor"
-                                      if accts[who].get("role") == "admin" else "admin")
-                    st.success("Role changed.")
+                if a1.button("Reset password", key="acct_reset", disabled=_self):
+                    _temp = accounts.new_temp_password()
+                    try:
+                        accounts.set_password(who, _temp, must_change=True)
+                        st.success(f"`{who}`'s password is reset. Give them this "
+                                   "temporary one — shown once — and they choose "
+                                   "their own at next sign-in.")
+                        st.code(_temp, language=None)
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(str(exc))
+                if a2.button("Toggle admin/instructor", key="acct_role",
+                             disabled=_self):
+                    try:
+                        accounts.set_role(who, "instructor"
+                                          if accts[who].get("role") == "admin"
+                                          else "admin")
+                        st.success("Role changed.")
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(str(exc))
                 a3, a4 = st.columns(2)
-                if a3.button(("Deactivate" if accts[who].get("active", True) else "Activate"),
-                             key="acct_active"):
-                    accounts.set_active(who, not accts[who].get("active", True))
-                    st.success("Updated.")
-                if a4.button("Remove", key="acct_remove"):
-                    accounts.remove_account(who)
-                    st.success(f"Removed `{who}`.")
+                if a3.button(("Deactivate" if accts[who].get("active", True)
+                              else "Activate"), key="acct_active", disabled=_self):
+                    try:
+                        accounts.set_active(who, not accts[who].get("active", True))
+                        st.success("Updated.")
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(str(exc))
+                # One click used to delete an account outright. It asks now.
+                if S.get("acct_confirm_remove") == who:
+                    st.warning(f"Remove `{who}` for good? Their surveys stay, "
+                               "but they can no longer sign in.", icon="⚠️")
+                    r1, r2 = st.columns(2)
+                    if r1.button("Yes, remove", key="acct_remove_yes",
+                                 type="primary"):
+                        accounts.remove_account(who)
+                        S.pop("acct_confirm_remove", None)
+                        st.success(f"Removed `{who}`.")
+                    if r2.button("Keep them", key="acct_remove_no"):
+                        S.pop("acct_confirm_remove", None)
+                        st.rerun()
+                elif a4.button("Remove", key="acct_remove", disabled=_self):
+                    S["acct_confirm_remove"] = who
+                    st.rerun()
 
     # ---- v2: AI feedback writer (optional) -------------------------------
     # Rendered last so the sidebar still reads top-to-bottom as identity →
@@ -743,7 +858,8 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
                         to_email=r["email"], to_name=r["name"], team=r["team"],
                         subject=mail.render_template(subj, ctx),
                         body=mail.render_template(body, ctx), attachments=[]))
-                _deliver(msgs, api, drafts, ok_label=f"{label} delivered")
+                _deliver(msgs, api, drafts, ok_label=f"{label} delivered",
+                         key=key)
     elif m.startswith("Open in my mail app"):
         st.caption("✓ Nothing is sent by this method: each link opens a message "
                    "in your own mail app for you to read and send.")
@@ -756,7 +872,8 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
                 {label: emailpack.invite_items(recipients, subj, body, course, eval_no)})
         if st.session_state.get(f"{key}_emlzip"):
             st.download_button("⬇ Download .eml zip", st.session_state[f"{key}_emlzip"],
-                               f"{label.lower()}_eml.zip", "application/zip")
+                               f"{label.lower()}_eml.zip", "application/zip",
+                               key=f"{key}_emldl")
     elif m.startswith("Download auto-send"):
         drafts = _review_first(
             key,
@@ -773,7 +890,7 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
             st.download_button(
                 "⬇ Download the zip", st.session_state[f"{key}_autozip"],
                 f"{label.lower()}_{'drafts' if _was_drafts else 'autosend'}.zip",
-                "application/zip")
+                "application/zip", key=f"{key}_autodl")
             st.caption(
                 ("Unzip it, then **double-click** `Prepare drafts (Windows).cmd` "
                  "on Windows, or `send_all_mac.applescript` on Mac. Every message "
@@ -788,7 +905,8 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
                             "Email": r.get("email", ""), "Link": r.get("link", "")}
                            for r in recipients])
         st.download_button("⬇ Download links CSV", df.to_csv(index=False),
-                           f"{label.lower()}_links.csv", "text/csv")
+                           f"{label.lower()}_links.csv", "text/csv",
+                           key=f"{key}_linkscsv")
 
 
 def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_no,
@@ -811,7 +929,7 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
             msgs = _build_messages(teams, roster, subj, body, attach_team, course, eval_no,
                                    report=report, narratives=narratives,
                                    reports=reports)
-            _deliver(msgs, api, drafts, ok_label="Feedback delivered")
+            _deliver(msgs, api, drafts, ok_label="Feedback delivered", key=key)
     elif m.startswith("Download .eml"):
         st.caption("✓ Nothing is sent by this method: you get a file per student "
                    "to open, read and send from your own mail app.")
@@ -823,7 +941,8 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
                                         reports=reports)})
         if st.session_state.get(f"{key}_emlzip"):
             st.download_button("⬇ Download .eml zip", st.session_state[f"{key}_emlzip"],
-                               "results_eml.zip", "application/zip")
+                               "results_eml.zip", "application/zip",
+                               key=f"{key}_emldl")
     elif m.startswith("Download auto-send"):
         drafts = _review_first(
             key,
@@ -842,7 +961,7 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
             st.download_button(
                 "⬇ Download the zip", st.session_state[f"{key}_autozip"],
                 f"results_{'drafts' if _was_drafts else 'autosend'}.zip",
-                "application/zip")
+                "application/zip", key=f"{key}_autodl")
             st.caption(
                 ("Unzip it, then **double-click** `Prepare drafts (Windows).cmd` "
                  "on Windows, or `send_all_mac.applescript` on Mac. Every message "
@@ -863,7 +982,8 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
                              "Subject": mail.render_template(subj, cx),
                              "Body": mail.render_template(body, cx)})
         st.download_button("⬇ Download recipients CSV", pd.DataFrame(rows).to_csv(index=False),
-                           "results_recipients.csv", "text/csv")
+                           "results_recipients.csv", "text/csv",
+                           key=f"{key}_recipcsv")
 
 
 def _email_body(default_html, key, height=220):
@@ -876,14 +996,21 @@ def _email_body(default_html, key, height=220):
     return email_ui.body_editor(default_html, key, height=height)
 
 
-def _mailer_for(method):
+def _mailer_for(method, key="mail"):
     """Build a mailer for the chosen method, overriding the secrets default."""
     c = dataclasses.replace(cfg, email=dataclasses.replace(cfg.email, mode=method))
-    return _make_mailer(c)
+    return _make_mailer(c, key=key)
 
 
-def _deliver(messages, method, drafts_only, ok_label="Done"):
-    """Shared send routine for invite/reminder emails (reuses the app mailer)."""
+def _deliver(messages, method, drafts_only, ok_label="Done", key="dl"):
+    """Shared send routine for invite/reminder emails (reuses the app mailer).
+
+    `key` namespaces the widgets: this runs up to three times in a single pass
+    (invitations, reminders, results), because Streamlit renders every tab's
+    body on every run — so a download button with no key of its own collides
+    with the one two tabs away as soon as their bytes happen to match, and the
+    duplicate-id error is raised while the page is being drawn.
+    """
     if not messages:
         st.warning("No recipients with an email address.")
         return
@@ -898,13 +1025,13 @@ def _deliver(messages, method, drafts_only, ok_label="Done"):
             f"⬇ Download {len(items)} ready-to-send email(s)",
             emailpack.zip_folders({ok_label: items}),
             f"{ok_label.lower().replace(' ', '_')}_to_review.zip", "application/zip",
-            type="primary",
+            type="primary", key=f"{key}_reviewzip",
         )
         st.success(f"Nothing has been sent. {len(items)} email(s) are in the zip — "
                    "open one to check it, then send them from your own mail "
                    "program. Untick the box above to send directly instead.")
         return
-    mailer = _mailer_for(method)
+    mailer = _mailer_for(method, key=key)
     if mailer is None:
         return
     prog = st.progress(0.0)
@@ -1090,14 +1217,50 @@ with tabs[0]:
 
     contact_file = st.file_uploader("Contact list (CSV/XLSX)",
                                     type=["csv", "xlsx", "xls"], key="survey_roster")
-    if contact_file is not None:
-        S["survey_contact_df"] = ingest.read_table(contact_file, contact_file.name)
-    cdf = S.get("survey_contact_df")
+    # Parsed once per file, not on every click. Streamlit hands the uploader's
+    # file back on every rerun, and this used to re-read it each time — for a
+    # workbook, a fresh openpyxl parse on every press of every button on every
+    # tab. The Qualtrics uploader below already guarded itself this way.
+    #
+    # And guarded. A bad file used to raise straight out of here, and because
+    # every tab renders on every run, the traceback replaced the entire app.
+    # `ingest.InputError` carries a message written for the instructor.
+    _csig = (f"{getattr(contact_file, 'name', '')}:{getattr(contact_file, 'size', 0)}"
+             if contact_file is not None else "")
+    if contact_file is None:
+        S.pop("survey_contact_sig", None)
+        S.pop("survey_contact_error", None)
+    elif S.get("survey_contact_sig") != _csig:
+        S["survey_contact_sig"] = _csig
+        S.pop("survey_contact_error", None)
+        try:
+            _df = ingest.read_table(contact_file, contact_file.name)
+            _errs, _warns = survey.contact_list_problems(_df)
+            if _errs:
+                raise ingest.InputError(" ".join(_errs))
+            S["survey_contact_df"] = _df
+            S["survey_contact_warnings"] = _warns
+        except ingest.InputError as exc:
+            S.pop("survey_contact_df", None)
+            S["survey_contact_error"] = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            S.pop("survey_contact_df", None)
+            S["survey_contact_error"] = (
+                "That file could not be read. Open it in Excel or Google Sheets, "
+                "save it again as CSV or .xlsx, and upload the saved copy. "
+                f"({type(exc).__name__}: {str(exc)[:160]})")
+    if S.get("survey_contact_error"):
+        st.error(S["survey_contact_error"], icon="📄")
+    elif contact_file is not None:
+        for _w in S.get("survey_contact_warnings") or []:
+            st.warning(_w, icon="⚠️")
+    cdf = S.get("survey_contact_df") if contact_file is not None else None
 
     # Either the list just uploaded, or — on a second visit, when the uploader is
     # empty — the one already saved for this survey. Without the fallback the
     # page looked unset up: no teams, no student count, nothing to send.
-    teams_preview = (survey.build_teams(cdf) if cdf is not None
+    teams_preview = (_contact_teams(cdf, S.get("survey_contact_sig", ""))
+                     if cdf is not None
                      else dict((_saved_snap or {}).get("teams", {}) or {}))
     if teams_preview:
         nstud = sum(len(v) for v in teams_preview.values())
@@ -1124,16 +1287,27 @@ with tabs[0]:
     # rather than an upload — and until 2.16.0 there was no safe way to make
     # one. Rosters are now keyed by permanent student ids, so there is.
     if _is_saved:
+        # A toggle, not a collapsed expander. Streamlit runs the body of an
+        # expander whether or not it is open, and this one builds five widgets
+        # per student: measured as the single most expensive thing on a
+        # steady rerun — a quarter of a second at 40 students, growing with
+        # the class — paid on every click anywhere in the app, for a panel
+        # nobody had opened. Off, it costs nothing.
         _owner_now = survey.survey_owner(vault_now(), slug)
-        with st.expander("👥 Teams — add, move or remove a student",
-                         expanded=False):
-            st.caption("Changes here take effect immediately. Every student "
-                       "keeps the same personal link, and an edit that would "
-                       "affect answers already collected says so and asks "
-                       "first.")
-            roster_ui.render(
-                vault_now(), slug,
-                read_only=not survey.can_access(_owner_now, user))
+        if st.toggle("👥 Teams — add, move or remove a student",
+                     key="roster_open",
+                     help="Changes here take effect immediately. Every student "
+                          "keeps the same personal link, and an edit that "
+                          "would affect answers already collected says so and "
+                          "asks first."):
+            with st.container(border=True):
+                st.caption("Changes here take effect immediately. Every student "
+                           "keeps the same personal link, and an edit that would "
+                           "affect answers already collected says so and asks "
+                           "first.")
+                roster_ui.render_fragment(
+                    vault_now(), slug,
+                    read_only=not survey.can_access(_owner_now, user))
 
     # ---- Already collected in Qualtrics? Upload the raw export instead -------
     with st.expander("Already have responses? Upload a Qualtrics / raw export - Optional - RARELY USED"):
@@ -1154,8 +1328,15 @@ with tabs[0]:
             try:
                 q_long, q_self, q_roster, q_rep = ingest.parse_qualtrics_export(
                     qfile, qfile.name)
+            except ingest.InputError as exc:
+                # Written for the instructor already — shown as it stands.
+                st.error(str(exc), icon="📄")
+                q_long = None
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Couldn't read that export: {exc}")
+                st.error("That export could not be read. In Qualtrics, use Data "
+                         "& Analysis → Export → CSV, and upload the file it "
+                         f"gives you. ({type(exc).__name__}: {str(exc)[:160]})",
+                         icon="📄")
                 q_long = None
             if q_long is not None and not q_long.empty:
                 S["qualtrics_sig"] = _qsig
@@ -2081,67 +2262,47 @@ with tabs[5]:
         if not eval_nos:
             st.info("No saved evaluations for this course yet.")
         else:
-            picks = st.multiselect("Evaluations to compare", eval_nos, default=eval_nos)
+            picks = st.multiselect("Evaluations to compare", eval_nos,
+                                   default=eval_nos, key="cmp_picks")
             settings = S.get("settings", GradeSettings())
-            # Behind a button on purpose. This reads and decrypts every response
-            # for every round and regrades each one — measured at twelve seconds
-            # for three rounds — and it used to do that on every rerun anywhere
-            # in the app, because the multiselect defaults to all rounds.
-            if not S.get("cmp_built"):
+            # What the comparison was built from. It reads, decrypts and
+            # regrades every response of every round — measured at twelve
+            # seconds for three rounds — so it is built when the button is
+            # pressed and *kept*. It used to set a flag that was never cleared,
+            # so after the first press it was rebuilt on every click anywhere
+            # in the app for the rest of the session, PDF included.
+            _sig = (course, tuple(picks), dataclasses.astuple(settings))
+            _built = S.get("cmp_result")
+            if _built and _built.get("sig") != _sig:
+                st.info("Your choice of rounds or grading rules has changed — "
+                        "press **Build the comparison** to compare these.",
+                        icon="🔄")
+                _built = None
+            elif not _built:
                 st.caption(f"Reads and regrades {len(picks)} round(s). This takes a "
                            f"few seconds for a large course.")
-            if st.button("Build the comparison", key="cmp_go", type="primary"):
-                S["cmp_built"] = True
-            evals_data = []
-            for en in (picks if S.get("cmp_built") else []):
-                ld = survey.responses_to_long(vault, survey.slugify(course, en))
-                if ld.empty:
-                    continue
-                se = survey.self_evaluations(vault, survey.slugify(course, en))
-                evals_data.append((en, graded(ld, settings, se)))
-            if not evals_data and S.get("cmp_built"):
+            if st.button("Build the comparison", key="cmp_go", type="primary",
+                         disabled=not picks):
+                _built = _build_comparison(course, picks, settings, _sig)
+                S["cmp_result"] = _built
+            if not picks:
+                st.caption("Choose at least one evaluation to compare.")
+            elif _built and not _built["evals"]:
                 st.warning("None of the selected evaluations have responses yet.")
-            elif not evals_data:
-                pass
-            else:
-                by_eval, team_of, names = {}, {}, set()
-                for en, tr in evals_data:
-                    by_eval[en] = {m.name: m for t in tr for m in t.members}
-                    for t in tr:
-                        for m in t.members:
-                            names.add(m.name); team_of[m.name] = t.team
-                rows = []
-                for nm in sorted(names, key=lambda n: (str(team_of.get(n, "")), n.lower())):
-                    row = {"Team": team_of.get(nm, ""), "Student": nm}
-                    for en, _ in evals_data:
-                        m = by_eval[en].get(nm)
-                        row[f"E{en} Score"] = m.individual_score if m else None
-                        row[f"E{en} Δ%"] = m.signed_pct if m else None
-                        row[f"E{en} Perf"] = m.performance if m else ""
-                    rows.append(row)
-                cmp_df = pd.DataFrame(rows)
+            elif _built:
+                cmp_df = _built["df"]
                 st.dataframe(cmp_df, **FULL_WIDTH, height=360)
                 st.download_button("⬇ comparison.csv", cmp_df.to_csv(index=False),
-                                   f"peerparley_{course}_comparison.csv", "text/csv")
-
-                teams_list = sorted({team_of[n] for n in names})
-                if teams_list:
+                                   f"peerparley_{course}_comparison.csv", "text/csv",
+                                   key="cmp_csv")
+                if _built["teams"]:
                     tsel = st.selectbox("Chart a team's individual score across rounds",
-                                        teams_list)
-                    chart = []
-                    for en, _ in evals_data:
-                        d = {"Eval": f"Eval {en}"}
-                        for nm in names:
-                            if team_of.get(nm) == tsel:
-                                m = by_eval[en].get(nm)
-                                d[nm] = m.individual_score if m else None
-                        chart.append(d)
-                    st.line_chart(pd.DataFrame(chart).set_index("Eval"))
-
+                                        _built["teams"], key="cmp_team")
+                    st.line_chart(_built["charts"][tsel])
                 st.download_button(
-                    "⬇ Comparison report (PDF)",
-                    pdfgen.build_comparison_pdf(course, evals_data),
-                    f"peerparley_{course}_comparison.pdf", "application/pdf", type="primary")
+                    "⬇ Comparison report (PDF)", _built["pdf"],
+                    f"peerparley_{course}_comparison.pdf", "application/pdf",
+                    type="primary", key="cmp_pdf")
 
 
 # =========================================================================== #

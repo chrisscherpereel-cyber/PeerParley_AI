@@ -148,7 +148,6 @@ def main(workdir: str, no_quill: bool = False) -> int:
     check("and the preview still renders it", "Hi Ann" in shown, shown[:200])
 
     # ---- the reminder path shares all of it ------------------------------
-    import datetime as _dt
     app = boot()
     labels = [str(getattr(e, "label", "")) for e in app.expander]
     check("the reminder panel exists",

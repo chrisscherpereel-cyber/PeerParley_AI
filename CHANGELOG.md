@@ -1,5 +1,130 @@
 # Changelog
 
+## 2.17.0 — release audit
+
+Asked for: a complete audit and clean for first release, with very low crash
+potential, anything that speeds the app up without hurting it, and every
+feature checked.
+
+For a Streamlit app, "crash potential" has a specific meaning. Every tab's body
+runs on every rerun, so an exception anywhere — on a tab nobody is looking at —
+replaces the whole page with a traceback. So the audit did not read the code
+for crashes; it built machines to find them, then fixed what they found.
+
+### What was built to look
+
+- **A crash matrix** (`tests/_every_state_app.py`). Seven states an instructor
+  can reach — nothing chosen, a roster saved, responses loaded, every preview
+  on, a Qualtrics import, someone else's survey, the Teams editor open — and in
+  each, every button pressed, every checkbox and toggle switched on, and every
+  option of every dropdown chosen, each from a freshly restored copy of the same
+  data. 320 renders, 67 buttons, 51 switches, 168 choices.
+- **A student-form matrix** (`tests/_student_form_app.py`). The only public
+  page, opened with every kind of link a student can arrive with — fresh,
+  pre-2.16.0, tampered, garbage, for a survey that does not exist, for a student
+  since moved or removed, for a closed or not-yet-open evaluation — and filled
+  in and submitted.
+- **An upload fuzz** (`tests/_fuzz_inputs.py`). Thirty malformed and awkward
+  contact lists and Qualtrics exports pushed all the way to the PDFs.
+- **Static guards** (`tests/test_release_hygiene.py`): pyflakes over the whole
+  tree, a key on every widget inside a function, and every icon checked with
+  Streamlit's own validator.
+- **A feature inventory** (`RELEASE.md` §1c): every feature the README
+  advertises, against the test that proves it. Four had none.
+- All of it was then run again **in a clean virtual environment holding only
+  `requirements.txt`** — what a new user or Streamlit Cloud installs — which
+  pulled Streamlit 1.67 and pandas 3.1, newer than the development environment.
+
+### Crashes fixed
+
+- **The duplicate-widget crash, again, in 23 places.** A widget with no `key`
+  gets an id derived from its arguments; two with the same arguments in one run
+  collide, and Streamlit raises mid-render. It took the confidential report off
+  the Results tab in 2.15.0. The audit found the same shape in the email send
+  paths — invitations, reminders and results share helpers, and all three
+  render on every run — including the Microsoft 365 sign-in button, which would
+  have collided at the exact moment an instructor tried to authenticate.
+  Reproduced with two "Download links CSV" buttons for one recipient. Every
+  stateful widget inside a function now has a key, and a test fails if one does
+  not.
+- **Pressing Redraft on one AI narrative killed the page.** Its notice used
+  `icon="↻"`, which is an arrow, not an emoji, and Streamlit rejects it at
+  render. The crash matrix could not reach it — it needs an existing draft and a
+  configured provider — so every icon in the code is now checked statically.
+- **A bad upload replaced the whole app with a traceback.** The contact-list
+  upload was not guarded at all: an empty file, a PDF or binary with the wrong
+  extension, or a corrupt workbook raised raw pandas errors. Every file now goes
+  through one reader that turns any failure into a sentence for the person who
+  uploaded it, and the Qualtrics upload shows those sentences as they stand.
+- **An undefined name** (`Any`) in the AI panel, latent only because of a
+  `from __future__` import. pyflakes is now clean across the whole tree.
+
+### Things that were silently wrong
+
+- **The contact-list template made a student called "nan nan".** Uploaded
+  exactly as shipped, its formula columns left a space in every unused row, so
+  those rows read as rows, and the reader did `str(cell)` — which turns a
+  missing pandas value into the text "nan". Any spreadsheet with stray content
+  beside a blank name did the same. The same `str()` labelled numeric teams
+  "1.0", "2.0" on screen and in every student's email. And the team column was
+  the first header *containing* "team" — which in the template's own layout
+  could be "Number on Team", putting every student on a team named after its
+  size. All three fixed; leaving the template's example student in is now
+  pointed out.
+- **Six real-world files read as nothing.** Excel's "Unicode Text" (UTF-16), a
+  European semicolon CSV, a workbook with the roster on its second sheet, and a
+  list with no recognisable name column all came back as zero students with no
+  word as to why. The first three now read; the last says which columns it
+  looked for and which it found.
+- **The student form tied typed answers to seats, not people.** Its widgets
+  were keyed by position, so if an instructor moved a teammate while a student
+  had the form open, the dollars the student had typed for one teammate became
+  another's on their next click. Keyed by permanent id now.
+
+### Security
+
+- **Every new instructor account and every password reset got the same
+  password, "PeerParley-Welcome", which is in the source of a public
+  repository.** `must_change` forces a new one only *after* signing in, so
+  anyone who knew an instructor's username could sign in first with it, set
+  their own, lock the instructor out and read their students' records.
+  Temporary passwords are now random, twelve characters, shown once. Passwords
+  under eight characters are refused for accounts and resets alike.
+- **Remove** deleted an account on one click; it asks now. An admin can no
+  longer demote, deactivate or remove their own account from the panel they are
+  standing in.
+- **The setup screen could hand out a replacement encryption key on a working
+  deployment.** On one that signs in only with stored accounts, a brief storage
+  outage read as "nobody can sign in" — `load_accounts` turned any failure into
+  an empty list, and the vault remembered it for a minute — and the setup
+  screen then offered a fresh configuration, new key included. Pasted into the
+  app's secrets, that makes every stored record unreadable, by anybody, for
+  good. Storage that cannot answer is no longer read as "no", and with a
+  working key configured the screen can only ever give out a password line.
+
+### Faster
+
+- **The Teams editor was the most expensive thing on the page, closed.** It
+  sat in a collapsed expander, whose body Streamlit runs whether or not it is
+  open, and built five widgets per student. A steady rerun took 0.25 s at 40
+  students and 0.48 s at 120; it is now 0.15 s and 0.17 s, and no longer grows
+  with the class. It is a toggle, and runs as a fragment when open so choosing
+  a team in a dropdown does not rerun all seven tabs.
+- **Compare rebuilt itself on every click.** Its button set a flag that was
+  never cleared, so after the first press every response of every round was
+  read, decrypted and regraded again on each click anywhere in the app, PDF
+  included. Built once per press now, kept, and marked out of date when the
+  choice of rounds or the grading rules change. It also counted "Ann Apple" and
+  "Apple, Ann" as two students.
+- **A contact list was re-parsed on every click** while it sat in the uploader,
+  workbooks included. Once per file now, and its teams preview is cached.
+
+Storage round trips per rerun remain at zero, and first paint against a slow
+backend remains under a second.
+
+60 new tests (427 total). The full crash matrix is a release gate rather than
+part of every run; `RELEASE.md` §1b has the command.
+
 ## 2.16.1 — write the email, not its HTML
 
 Reported: *"The email messages shown in the application should be WYSIWYG not

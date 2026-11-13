@@ -106,10 +106,22 @@ def main(workdir: str) -> int:
                                         "role": "admin", "source": "secrets"}
         app.session_state["new_course"] = "RE101"
         app.session_state["new_eval"] = "1"
+        app.session_state["roster_open"] = state.pop("_closed", False) is False
         for k, v in state.items():
             app.session_state[k] = v
         app.run()
         return app
+
+    # ---- closed, it costs nothing -----------------------------------------
+    # It sat in a collapsed expander, whose body Streamlit runs whether or not
+    # it is open — five widgets per student on every click anywhere in the app.
+    app = boot(_closed=True)
+    check("closed, the editor builds no widgets",
+          not [b for b in app.button if str(getattr(b, "label", "")) == "Move"],
+          f"{len(app.button)} buttons")
+    check("but the switch to open it is there",
+          any("Teams — add, move or remove" in str(getattr(t, "label", ""))
+              for t in app.toggle))
 
     # ---- the editor is on the page --------------------------------------
     app = boot()
@@ -118,7 +130,7 @@ def main(workdir: str) -> int:
     if app.exception:
         print("FAILURES:", FAILURES)
         return 1
-    labels = [str(getattr(e, "label", "")) for e in app.expander]
+    labels = [str(getattr(t, "label", "")) for t in app.toggle]
     check("the Teams editor is offered",
           any("Teams — add, move or remove" in s for s in labels), str(labels))
     buttons = [str(getattr(b, "label", "")) for b in app.button]

@@ -773,17 +773,14 @@ def generate_draft(
     if payload is None:
         # The retry (if any) was also cut. Work down the recovery ladder.
         payload = salvage_object_fields(partial_raw)
-        recovered_by = "the fields that finished" if payload else ""
         if not payload:
             strings = salvage_partial_strings(partial_raw, NARRATIVE_KEYS)
             if strings:
                 payload = dict(strings)
-                recovered_by = "prose recovered from the cut-off reply"
         if not payload:
             fragment = readable_fragment(partial_raw)
             if fragment:
                 payload = {"strengths": fragment}
-                recovered_by = "readable text pulled from an unparseable reply"
         if not payload:
             failed = _failed(src, settings,
                              str(last_cut) if last_cut else "Reply was cut off.",

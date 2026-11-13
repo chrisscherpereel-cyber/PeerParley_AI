@@ -1,7 +1,6 @@
 """UI-side helpers shared by app.py (kept out of app.py to avoid ordering issues)."""
 from __future__ import annotations
 
-import base64
 from typing import Dict, List, Optional
 
 import streamlit as st
@@ -131,8 +130,16 @@ def build_messages(teams: List[TeamResult], roster: Optional[Roster],
     return messages
 
 
-def make_mailer(cfg: AppConfig):
-    """Return a ready mailer, driving the Graph device-code flow in the UI."""
+def make_mailer(cfg: AppConfig, key: str = "mail"):
+    """Return a ready mailer, driving the Graph device-code flow in the UI.
+
+    `key` namespaces the sign-in button. The send routine that calls this runs
+    up to three times in one pass — invitations, reminders and results all
+    render together, because Streamlit renders every tab's body on every run —
+    and three identical keyless buttons raise a duplicate-id error mid-render.
+    That would have taken the page down at the exact moment an instructor was
+    trying to authenticate Microsoft 365.
+    """
     if cfg.email.mode == "smtp":
         if not cfg.email.smtp_password:
             st.error("SMTP selected but no smtp_password in secrets.")
@@ -158,7 +165,7 @@ def make_mailer(cfg: AppConfig):
     flow = st.session_state["graph_flow"]
     st.info(flow.get("message", "Complete sign-in in your browser."))
     st.code(f"{flow.get('verification_uri')}\nCode: {flow.get('user_code')}")
-    if st.button("I've completed sign-in"):
+    if st.button("I've completed sign-in", key=f"{key}_graph_done"):
         if gm.complete_device_flow(flow):
             st.success("Microsoft 365 authenticated.")
             del st.session_state["graph_flow"]

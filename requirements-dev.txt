@@ -13,3 +13,4 @@ pytest>=8.0,<10
 
 # The regression harness also uses PyMuPDF (from requirements-optional.txt) in
 # the paths that render a PDF preview; it is skipped if absent.
+pyflakes>=3.0,<4    # tests/test_release_hygiene.py lints the tree as a test

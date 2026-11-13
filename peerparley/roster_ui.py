@@ -79,9 +79,12 @@ def _render_pending(vault: Vault, slug: str) -> bool:
     impact = survey.edit_impact(vault, slug, action, who["id"], team=target)
 
     if impact["safe"]:
-        # Nothing stored is affected, so there is nothing to confirm.
+        # Nothing stored is affected, so there is nothing to confirm. Rerun the
+        # whole app afterwards: this editor runs as a fragment, and without a
+        # full rerun the links, the response table and the grades on the
+        # other tabs would go on showing the roster as it was a moment ago.
         _apply(vault, slug, pending)
-        return False
+        st.rerun()
 
     verb = ("Remove" if action == "remove" else
             f"Move to {target or 'no team'}")
@@ -119,6 +122,27 @@ def _apply(vault: Vault, slug: str, pending: dict) -> None:
 def _request(action: str, member_id: str, team: str = "") -> None:
     st.session_state[PENDING] = {"action": action, "member_id": member_id,
                                  "team": team}
+
+
+def _fragment(fn):
+    """`st.fragment` where this Streamlit has it, otherwise the plain function.
+
+    In a fragment, choosing a team in a student's dropdown reruns only the
+    editor rather than all seven tabs. Anything that actually changes the
+    roster still calls `st.rerun()`, which from inside a fragment reruns the
+    whole app — so the links, the response table and the grades never show a
+    roster that is out of date.
+
+    requirements.txt allows Streamlit from 1.36, and `st.fragment` arrived in
+    1.37, hence the fallback.
+    """
+    frag = getattr(st, "fragment", None)
+    return frag(fn) if callable(frag) else fn
+
+
+@_fragment
+def render_fragment(vault: Vault, slug: str, read_only: bool = False) -> None:
+    render(vault, slug, read_only=read_only)
 
 
 def render(vault: Vault, slug: str, read_only: bool = False) -> Optional[dict]:

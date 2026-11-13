@@ -22,7 +22,7 @@ import io
 import re
 import zipfile
 from email.message import EmailMessage
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 from . import email_delivery as mail
 from . import pdfgen

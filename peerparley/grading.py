@@ -499,7 +499,6 @@ def compute(
         # deduction, and it also used to drag the team average down for everyone
         # else. A missing average means missing data, so it is left out of both.
         received_avgs = {k: float(np.mean(v)) for k, v in received.items() if v}
-        unrated = [k for k in member_keys if k not in received_avgs]
         team_avg = float(np.mean(list(received_avgs.values()))) if received_avgs else 0.0
         ranking = sorted(received_avgs, key=lambda k: received_avgs[k], reverse=True)
         rank_of = {k: i + 1 for i, k in enumerate(ranking)}
@@ -851,7 +850,7 @@ def adjustment_note(teams: List["TeamResult"],
     widest = max((abs(p - 1.0) for p in spread), default=0.0)
     implied = settings.sensitivity_B * mean_q * widest * 100.0
     step = int(settings.rounding_step or 0)
-    bits = [f"No student's grade moved from the team score."]
+    bits = ["No student's grade moved from the team score."]
     bits.append(
         f"The furthest anyone sat from their team's average was "
         f"{widest:.0%}, and written support averaged {mean_q:.2f}, so at "

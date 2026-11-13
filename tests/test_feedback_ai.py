@@ -11,7 +11,6 @@ Run with:  python -m pytest tests/ -q
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
 
@@ -1558,7 +1557,6 @@ def test_empty_drafts_get_their_own_metric_not_unsupported_claims():
 
 from peerparley.llm import (  # noqa: E402
     FREE_TIER_DAILY,
-    FREE_TIER_RPM,
     is_free_model,
 )
 
@@ -2105,7 +2103,7 @@ REAL_402 = ("Error code: 402 - {'error': {'message': 'This request requires "
 
 
 def test_a_402_is_classified_as_billing_not_as_a_generic_failure():
-    from peerparley.llm import _is_auth, _is_transient
+    from peerparley.llm import _is_transient
     assert _is_billing(Exception(REAL_402))
     # And it must not be retried: the balance will not change on retry.
     assert not _is_transient(Exception(REAL_402))
@@ -2349,7 +2347,7 @@ def test_a_probe_that_raises_still_returns_the_shape_the_picker_reads():
 from peerparley import grading as grd  # noqa: E402
 from peerparley import survey as svy  # noqa: E402
 from peerparley import workspace as wsp  # noqa: E402
-from peerparley.llm import QuotaLLMError, _is_auth, _is_billing, _is_quota  # noqa: E402
+from peerparley.llm import QuotaLLMError, _is_auth, _is_quota  # noqa: E402
 
 
 def _rows(spec, team="T1", comment="{ee} carried the analysis and met every deadline."):

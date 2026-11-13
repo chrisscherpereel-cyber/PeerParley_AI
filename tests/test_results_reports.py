@@ -473,7 +473,7 @@ def test_the_summary_pdf_prints_the_self_vs_peers_gap():
 def test_the_summary_pdf_drops_a_flat_column_and_says_which():
     """A column of thirty identical cells squeezes the ones that carry
     information, on a sheet that has no width to spare."""
-    fitz = pytest.importorskip("fitz")
+    pytest.importorskip("fitz")
     teams = compute(section(alloc=False), GradeSettings())   # no self-evals either
     data = pdfgen.build_section_summary_pdf(teams, "QC101", "1")
     text = _pdf_text(data)

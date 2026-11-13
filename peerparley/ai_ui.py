@@ -14,7 +14,7 @@ authoritative original.
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
@@ -45,7 +45,6 @@ from .llm import (
     register_pricing,
 )
 from .openrouter_catalog import (
-    ORModel,
     load_models,
     pricing_map,
     vendors as catalog_vendors,
@@ -841,7 +840,7 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
     regen = st.session_state.pop("ai_regen_key", None)
     if regen:
         targets = [regen]
-        st.info(f"Redrafting one student…", icon="↻")
+        st.info("Redrafting one student…", icon="🔄")
     elif run_all and done:
         # Redoing everything throws away finished drafts, the edits on them and
         # the approvals. One stray click should not be able to do that, so it
@@ -1067,6 +1066,7 @@ def render_review_panel(teams: List[TeamResult], settings: AISettings,
         "application/json",
         help="Every draft, its citations, its flags, and what you approved — "
              "the record of what an AI wrote and what a human signed off on.",
+        key="ai_audit_dl",
     )
 
     # ---- per-student review ---------------------------------------------

@@ -22,7 +22,7 @@ from typing import Callable, Dict, List, Optional
 
 import requests
 
-from .config import EmailConfig, load_config
+from .config import EmailConfig
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = ["Mail.Send", "Mail.ReadWrite", "User.Read"]

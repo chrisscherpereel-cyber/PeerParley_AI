@@ -335,7 +335,6 @@ def read_bundle(raw: bytes) -> Tuple[Dict[str, Any], str]:
             raise ValueError("not a PeerParley bundle")
     except Exception:
         # Legacy: the whole file is an encrypted DataFrame.
-        from .security import CryptoError  # noqa: F401 - clarity at the call site
         frame = _frame_from_bytes(raw, "parquet")
         return ({"long_df": frame, "self_evals": {}, "roster": None,
                  "course": "", "eval_no": "", "drafts": {},

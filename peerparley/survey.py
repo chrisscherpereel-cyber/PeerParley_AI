@@ -429,10 +429,103 @@ def _contact_columns(df: pd.DataFrame):
     first = contains(["first name", "firstname", "first"])
     last = contains(["last name", "lastname", "last"])
     email = contains(["primaryemail", "email", "e-mail"])
-    team = contains(["team", "group"])
+    # The team column, by exact header first. A substring match alone took the
+    # first column containing "team" — and the contact-list template has
+    # "Number on Team" and "Team Member 1…6" beside "Team". With those columns
+    # in another order, every student landed on a team named after its size.
+    team = exact(["team", "team name", "team number", "team #", "team no",
+                  "team no.", "group", "group name", "group number"])
+    if not team:
+        for k, orig in low.items():
+            if ("team" in k or "group" in k) and not any(
+                    bad in k for bad in ("member", "number on", "size",
+                                         "count", "how many", "mates")):
+                team = orig
+                break
     klass = exact(["class", "course", "class name"]) or contains(["class", "course"])
     section = exact(["section", "sec"]) or contains(["section"])
     return full, first, last, email, team, klass, section
+
+
+def _cell(row, column) -> str:
+    """One contact-list cell as clean text — "" for anything empty.
+
+    It used to be `str(row.get(column, "")).strip()`, and `str()` of a missing
+    pandas value is the text "nan". So a row with no name but anything at all in
+    another column became a student called **"nan nan"** — and the built-in
+    contact-list template guarantees exactly that, because its formula columns
+    run down a hundred rows and leave a space in every unused one. The release
+    audit found it by uploading the template as shipped.
+
+    A whole-number float is written as a whole number, because a spreadsheet
+    column of team numbers reads as floats and the teams used to be labelled
+    "1.0", "2.0" on screen and in every student's email.
+    """
+    if not column:
+        return ""
+    value = row.get(column, "")
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    return "" if text.lower() in ("nan", "none", "nat") else text
+
+
+# The example row that ships in assets/ContactList_Template.xlsx.
+_TEMPLATE_EXAMPLE = {("aaa", "bbb", "bbb@ccc.com")}
+
+
+def contact_list_problems(contact_df: pd.DataFrame) -> Tuple[List[str], List[str]]:
+    """What is wrong with a contact list, before anything is built from it.
+
+    Returns ``(errors, warnings)``. An error means nothing useful can be made
+    from the file; a warning means it will work but not the way the instructor
+    probably expects. Both used to be silent: a list with no name column came
+    back as zero students, and one with no team column as everybody on no
+    team — and the page offered no reason for either.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+    if contact_df is None or contact_df.empty:
+        return ["That file has no students in it."], []
+    full, first, last, email, team, _klass, _section = _contact_columns(contact_df)
+    shown = ", ".join(f"“{c}”" for c in list(contact_df.columns)[:8])
+    if not (full or first or last):
+        errors.append(
+            "No name column was found. PeerParley looks for a column headed "
+            "“First Name” and “Last Name”, or a single “Name” — this file's "
+            f"columns are {shown}. Rename one and upload it again, or start "
+            "from the template above.")
+    if not team:
+        warnings.append(
+            "No team column was found, so every student is on the roster with "
+            "no team. Add a column headed “Team”, or put students on teams "
+            "afterwards under **👥 Teams**.")
+    if not email:
+        warnings.append(
+            "No email column was found. Links can still be built and copied, "
+            "but PeerParley cannot email them to anyone.")
+    # The template's own example student, left in by mistake, becomes a real
+    # student with a real link — and a teammate everybody on team 1 is asked
+    # to evaluate. Said, not silently dropped: it is the instructor's file.
+    if first and last:
+        for _, row in contact_df.iterrows():
+            sample = (_cell(row, first).lower(), _cell(row, last).lower(),
+                      _cell(row, email).lower() if email else "")
+            if sample in _TEMPLATE_EXAMPLE:
+                warnings.append(
+                    "The template's example student (**AAA BBB**, "
+                    "BBB@CCC.com) is still in this file, so it will be "
+                    "treated as a real student. Delete that row and upload "
+                    "the file again.")
+                break
+    return errors, warnings
 
 
 def build_roster(contact_df: pd.DataFrame,
@@ -460,20 +553,17 @@ def build_roster(contact_df: pd.DataFrame,
     loose: List[dict] = []
     seen = set()
     for _, row in contact_df.iterrows():
-        first = str(row.get(first_c, "")).strip() if first_c else ""
-        last = str(row.get(last_c, "")).strip() if last_c else ""
-        if full_c and pd.notna(row.get(full_c)) and str(row.get(full_c)).strip():
-            name = str(row[full_c]).strip()
-        else:
-            name = f"{first} {last}".strip()
+        first = _cell(row, first_c)
+        last = _cell(row, last_c)
+        name = _cell(row, full_c) or f"{first} {last}".strip()
         if not name:
             continue
-        team = str(row.get(team_c, "")).strip() if team_c else ""
+        team = _cell(row, team_c)
         key = (team, name_key(name))
         if key in seen:
             continue
         seen.add(key)
-        email = str(row.get(email_c, "")).strip() if email_c else ""
+        email = _cell(row, email_c)
         prior = find_member(existing, name, email)
         record = {
             "id": (prior or {}).get("id") or new_member_id(),
@@ -481,8 +571,8 @@ def build_roster(contact_df: pd.DataFrame,
             "first": first or name.split(" ")[0],
             "last": last or name.split(" ")[-1],
             "email": email,
-            "class": str(row.get(class_c, "")).strip() if class_c else "",
-            "section": str(row.get(section_c, "")).strip() if section_c else "",
+            "class": _cell(row, class_c),
+            "section": _cell(row, section_c),
         }
         (teams.setdefault(team, []) if team else loose).append(record)
 
@@ -1556,6 +1646,20 @@ def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # Public student form (served by app.py when a ?t=<token> is present)
 # --------------------------------------------------------------------------- #
+def _wid(member: dict, index: int) -> str:
+    """The widget-key stem for one teammate on the student form.
+
+    Their permanent id, not their position. Streamlit keeps a widget's value in
+    session state by key across reruns, so a positional key ties a typed value
+    to a *seat*: if the instructor moved a teammate while a student had the
+    form open, the student's next click re-rendered with the new member list
+    and the $30 they had typed for one teammate silently became another's. The
+    id follows the person. Position is the fallback for a roster from before
+    ids existed.
+    """
+    return str(member.get("id") or f"p{index}")
+
+
 def answers_by_position(stored: Dict, members: List[dict]) -> Dict[str, dict]:
     """Stored id-keyed answers → the position keys the form widgets use.
 
@@ -1746,7 +1850,7 @@ def render_student_app(token: str) -> None:
                     except Exception:
                         default_idx = None
                 choice = st.radio(stmt, scale, index=default_idx, horizontal=True,
-                                  key=f"r_{i}_{si}")
+                                  key=f"r_{_wid(m, i)}_{si}")
                 if choice is None:
                     missing_ratings += 1
                 rvals.append((7 - scale.index(choice)) if choice in scale else None)
@@ -1755,11 +1859,11 @@ def render_student_app(token: str) -> None:
         if survey.get("ask_improve", True):
             entry["improve"] = st.text_area(
                 (survey.get("improve_prompt", "") or "").replace("{member}", m["name"]),
-                value=str(pa.get("improve", "")), key=f"imp_{i}")
+                value=str(pa.get("improve", "")), key=f"imp_{_wid(m, i)}")
         if survey.get("ask_contribution", True):
             entry["contribution"] = st.text_area(
                 (survey.get("contribution_prompt", "") or "").replace("{member}", m["name"]),
-                value=str(pa.get("contribution", "")), key=f"con_{i}")
+                value=str(pa.get("contribution", "")), key=f"con_{_wid(m, i)}")
         answers[str(i)] = entry
         st.divider()
 
@@ -1773,7 +1877,7 @@ def render_student_app(token: str) -> None:
             exr = pa.get("rank")
             who = m["name"] + ("  (yourself)" if i == pos else "")
             choice = st.radio(who, cats, index=(cats.index(exr) if exr in cats else None),
-                              horizontal=True, key=f"rank_{i}")
+                              horizontal=True, key=f"rank_{_wid(m, i)}")
             answers[str(i)]["rank"] = choice if choice in cats else None
         ranks = [answers[str(i)].get("rank") for i in range(len(members))]
         if any(r is None for r in ranks):
@@ -1798,7 +1902,7 @@ def render_student_app(token: str) -> None:
             pa = pmembers.get(str(i), {}) or {}
             allocs[str(i)] = st.number_input(m["name"], min_value=0, max_value=total,
                                              value=int(pa.get("alloc", 0) or 0), step=1,
-                                             key=f"alloc_{i}")
+                                             key=f"alloc_{_wid(m, i)}")
             answers[str(i)]["alloc"] = allocs[str(i)]
         running = sum(int(v) for v in allocs.values())
         if running == total:
@@ -1834,7 +1938,8 @@ def render_student_app(token: str) -> None:
     else:
         st.success("Everything looks complete — you're ready to submit.")
 
-    if st.button("Submit evaluation", type="primary", disabled=bool(problems)):
+    if st.button("Submit evaluation", type="primary", key="pp_student_submit",
+                 disabled=bool(problems)):
         if window_state(survey) != "open":
             st.warning(window_message(survey))
             return

@@ -68,7 +68,21 @@ def key_is_usable() -> bool:
 
 
 def has_credential() -> bool:
-    """Is there any way to sign in — an app password or a stored account?"""
+    """Is there any way to sign in — an app password or a stored account?
+
+    Errs towards yes. Answering "no" puts the setup screen in front of the
+    sign-in form, and the release audit found that a wrong "no" was reachable
+    by accident: on a deployment that signs in only with stored accounts, the
+    accounts are read from storage, and `load_accounts` turns *any* failure —
+    a provider that is briefly unreachable, a timeout — into an empty list,
+    which the vault then remembers as "missing" for a minute. So a network
+    blip read as "nobody can sign in", and the screen offered a fresh setup.
+
+    Now only a storage that answers, and answers "there are no accounts",
+    counts as no. Anything it cannot answer leaves the sign-in form in place,
+    where a failed sign-in is an inconvenience rather than an invitation to
+    reconfigure.
+    """
     try:
         cfg = load_config()
         if (cfg.app_password_sha256 or "").strip():
@@ -76,9 +90,20 @@ def has_credential() -> bool:
     except Exception:  # noqa: BLE001
         pass
     try:
-        return bool(accounts.load_accounts())
+        from .vault import Vault
+        vault = Vault()
+        if not vault.available:
+            return True            # cannot tell; the storage screen says why
+        if accounts.ACCOUNTS_KEY not in set(vault.list()):
+            return False           # storage answered: no account file at all
     except Exception:  # noqa: BLE001
-        return False
+        return True                # storage did not answer: do not guess "no"
+    try:
+        import json
+        stored = json.loads(vault.get_bytes(accounts.ACCOUNTS_KEY).decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return True                # it exists but could not be read: same
+    return bool(stored)
 
 
 def needed() -> bool:
@@ -175,6 +200,21 @@ def secrets_block(pw_hash: str, fernet_key: str, public_url: str = "") -> str:
     )
 
 
+def password_only_block(pw_hash: str) -> str:
+    """Just the sign-in line, for a deployment whose key already works.
+
+    Deliberately carries no `fernet_key`. If this screen is ever shown to a
+    deployment that has stored data — which is what a storage outage could do
+    before 2.17.0 — the most an instructor can paste from it is a password.
+    """
+    return (
+        "# Add this line to your existing secrets. Leave everything else —\n"
+        "# in particular fernet_key — exactly as it is: your stored data is\n"
+        "# encrypted with that key, and a different one cannot read it.\n\n"
+        f'app_password_sha256 = "{pw_hash}"\n'
+    )
+
+
 def can_write_secrets() -> Tuple[bool, str]:
     """Is writing a local secrets file possible, and should it be offered?
 
@@ -252,12 +292,13 @@ def render() -> None:
 
     with st.form("pp_setup"):
         pw1 = st.text_input("Choose an administrator password", type="password",
+                            key="pp_wizard_pw1",
                             help="At least 10 characters. You can add accounts "
                                  "for other instructors later, from inside the "
                                  "app.")
-        pw2 = st.text_input("Type it again", type="password")
+        pw2 = st.text_input("Type it again", type="password", key="pp_wizard_pw2")
         url = st.text_input(
-            "This app's web address (optional)",
+            "This app's web address (optional)", key="pp_wizard_url",
             placeholder="https://your-peerparley-address",
             help="Copy it from your browser's address bar. It is what makes each "
                  "student's personal link work; you can also fill it in later, "
@@ -271,6 +312,13 @@ def render() -> None:
                      "evaluations.")
         elif pw1 != pw2:
             st.error("Those two passwords are not the same.")
+        elif not missing_key:
+            # A working key is already configured, so there may be stored
+            # student data encrypted under it. Never hand out a replacement:
+            # pasted over the existing secrets, a new key makes every stored
+            # record unreadable for good. Give only the line that is missing.
+            st.session_state["pp_setup_block"] = password_only_block(
+                password_hash(pw1))
         else:
             st.session_state["pp_setup_block"] = secrets_block(
                 password_hash(pw1), new_fernet_key(), url)
@@ -295,6 +343,11 @@ def render() -> None:
     st.code(block, language="toml")
 
     writable, why_not = can_write_secrets()
+    if not missing_key:
+        writable, why_not = False, (
+            "Add the line above to your existing secrets — in "
+            "`.streamlit/secrets.toml`, or the app's Secrets box on Streamlit "
+            "Cloud — and leave the rest as it is.")
     c1, c2 = st.columns([1, 1.4])
     if writable:
         if c1.button("Save it for me", type="primary", key="pp_setup_write"):
@@ -310,7 +363,7 @@ def render() -> None:
     else:
         c1.caption(why_not)
     c2.download_button("⬇ Download secrets.toml", block, "secrets.toml",
-                       "text/plain",
+                       "text/plain", key="pp_wizard_download",
                        help="For Streamlit Cloud: open the app's Settings → "
                             "Secrets and paste the contents in.")
 
