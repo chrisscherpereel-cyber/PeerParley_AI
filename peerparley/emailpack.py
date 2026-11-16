@@ -177,28 +177,77 @@ def _as_str(s: str) -> str:
                   .replace("\r", "").replace("\n", "\\n")) + '"'
 
 
-def _windows_launcher(drafts: bool = False) -> str:
+def _windows_launcher(drafts: bool = False,
+                      launcher: str = "Send emails (Windows).cmd") -> str:
     """A double-clickable .cmd that runs the PowerShell engine for the user.
 
     Double-clicking a .ps1 only opens Notepad, and running it by hand trips the
     execution policy — too much for most people. This launcher does it all:
     double-click, and it calls PowerShell with the policy bypassed for this one
     run, from its own folder. Mirrors the Mac 'double-click and Run' experience.
+
+    Two ways it used to mislead (2.17.2):
+
+    * Double-clicking it *inside* the downloaded .zip makes Windows Explorer
+      copy just this one file to a temp folder and run it there, without the
+      engine or the PDFs. PowerShell then printed "file does not exist" and its
+      banner. The launcher now checks the engine is beside it first and, if
+      not, says in plain words to extract the zip and run it from there.
+    * It printed "All done" whatever happened. It now says so only when the
+      engine finished cleanly, and otherwise points at the messages above.
+
+    Batch rules kept here on purpose: no parenthesised ``if (...)`` blocks
+    (the launcher's own name has parentheses, which would end a block early),
+    only ``goto`` jumps; and no ``< > | &`` in any echoed text.
     """
-    return (
-        "@echo off\r\n"
-        "setlocal\r\n"
-        "cd /d \"%~dp0\"\r\n"
-        "echo.\r\n"
-        + ("echo   PeerParley - preparing your emails as Outlook drafts...\r\n"
-           if drafts else
-           "echo   PeerParley - sending your emails through Outlook...\r\n")
-        + "echo   (If Windows asks, choose \"More info\" then \"Run anyway\".)\r\n"
-        "echo.\r\n"
-        "powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0send_all_windows.ps1\"\r\n"
-        "echo.\r\n"
-        "echo   All done. You can close this window.\r\n"
-        "pause\r\n")
+    doing = ("preparing your emails as Outlook drafts" if drafts
+             else "sending your emails through Outlook")
+    return "".join(line + "\r\n" for line in [
+        "@echo off",
+        "setlocal",
+        "cd /d \"%~dp0\"",
+        "echo.",
+        f"echo   PeerParley - {doing}...",
+        "echo.",
+        "if not exist \"%~dp0send_all_windows.ps1\" goto notunzipped",
+        "echo   (If Windows asks, choose \"More info\" then \"Run anyway\".)",
+        "echo.",
+        "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "
+        "\"%~dp0send_all_windows.ps1\"",
+        "if errorlevel 1 goto failed",
+        "echo.",
+        "echo   All done. You can close this window.",
+        "echo.",
+        "pause",
+        "exit /b 0",
+        "",
+        ":failed",
+        "echo.",
+        "echo   Not everything worked - please read the messages above.",
+        ("echo   Anything listed as \"draft ready\" is in your Outlook Drafts folder."
+         if drafts else
+         "echo   Anything listed as \"sent\" has already gone; do not run this again"),
+        ("echo   Fix the problem, then double-click this file again."
+         if drafts else
+         "echo   for those people. Fix the problem, then send the rest from Outlook."),
+        "echo.",
+        "pause",
+        "exit /b 1",
+        "",
+        ":notunzipped",
+        "echo   This file cannot run on its own - the files it needs are not next",
+        "echo   to it. That happens when it is opened from inside the .zip.",
+        "echo.",
+        "echo   Nothing has been " + ("prepared" if drafts else "sent") + ". To fix it:",
+        "echo     1. Close this window.",
+        "echo     2. Right-click the downloaded .zip file and choose \"Extract All...\"",
+        "echo        then click \"Extract\".",
+        "echo     3. In the folder that opens, double-click",
+        f"echo        \"{launcher}\"",
+        "echo.",
+        "pause",
+        "exit /b 1",
+    ])
 
 
 def _powershell(parts: List[dict], drafts: bool = False) -> str:
@@ -228,10 +277,10 @@ def _powershell(parts: List[dict], drafts: bool = False) -> str:
         "  Write-Host ''\n"
         "  Write-Host 'Could not start Outlook. Make sure Microsoft Outlook is installed'\n"
         "  Write-Host 'and signed in, then run this again.' -ForegroundColor Yellow\n"
-        "  return\n"
+        "  exit 1\n"
         "}\n"
         "$msgs = @(\n" + ",\n".join(rows) + "\n)\n"
-        "$sent = 0; $skipped = 0\n"
+        "$sent = 0; $skipped = 0; $failed = 0\n"
         "foreach ($m in $msgs) {\n"
         "  if (-not $m.to) { $skipped++; continue }\n"
         "  try {\n"
@@ -239,8 +288,14 @@ def _powershell(parts: List[dict], drafts: bool = False) -> str:
         "    $mail.To = $m.to\n"
         "    $mail.Subject = $m.subject\n"
         "    $mail.HTMLBody = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($m.body64))\n"
+        # A missing PDF must stop that message, not send it bare: a student
+        # would get "your report is attached" with nothing attached.
+        "    $missing = @()\n"
         "    if ($m.atts) { foreach ($a in ($m.atts -split ';')) { $p = Join-Path $dir $a;"
-        " if (Test-Path $p) { [void]$mail.Attachments.Add($p) } } }\n"
+        " if (Test-Path -LiteralPath $p) { [void]$mail.Attachments.Add($p) }"
+        " else { $missing += $a } } }\n"
+        "    if ($missing.Count) { throw \"attachment not found: $($missing -join ', ')"
+        " (keep every file together in the extracted folder)\" }\n"
         + ("    $mail.Save(); $sent++\n"
            "    Write-Host \"  draft ready -> $($m.to)\"\n" if drafts else
            "    $mail.Send(); $sent++\n"
@@ -249,13 +304,19 @@ def _powershell(parts: List[dict], drafts: bool = False) -> str:
         + ("    Write-Host \"  could not prepare $($m.to): "
            if drafts else "    Write-Host \"  could not send to $($m.to): ")
         + "$($_.Exception.Message)\" -ForegroundColor Yellow\n"
+        "    $failed++\n"
         "  }\n"
         "}\n"
         "Write-Host ''\n"
         + ("Write-Host \"$sent draft(s) are in your Outlook Drafts folder. "
            "Nothing has been sent.\" -ForegroundColor Green\n" if drafts else
            "Write-Host \"Sent $sent message(s) via Outlook.\" -ForegroundColor Green\n")
-        + "if ($skipped) { Write-Host \"$skipped had no email address and were skipped.\" }\n")
+        + "if ($skipped) { Write-Host \"$skipped had no email address and were skipped.\" }\n"
+        + ("if ($failed) { Write-Host \"$failed could not be prepared (see above).\""
+           if drafts else
+           "if ($failed) { Write-Host \"$failed could not be sent (see above).\"")
+        + " -ForegroundColor Yellow; exit 2 }\n"
+        "exit 0\n")
 
 
 def _applescript(parts: List[dict], drafts: bool = False) -> str:
@@ -416,7 +477,7 @@ def send_all_pack(parts: List[dict], folder_label: str = "Emails",
                 if fname not in seen:
                     z.writestr(fname, data)
                     seen.add(fname)
-        z.writestr(launcher, _windows_launcher(drafts))
+        z.writestr(launcher, _windows_launcher(drafts, launcher))
         z.writestr("send_all_windows.ps1", _powershell(parts, drafts))
         z.writestr("send_all_mac.applescript", _applescript(parts, drafts))
         z.writestr("READ ME FIRST.txt", _readme(drafts, launcher))

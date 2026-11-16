@@ -904,7 +904,8 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
                  "Unzip it, then **double-click** `Send emails (Windows).cmd` on "
                  "Windows, or `send_all_mac.applescript` on Mac. This sends them "
                  "straight from your own Outlook or Apple Mail.")
-                + " Keep the files together in the unzipped folder.")
+                + " On Windows, right-click the zip and choose **Extract All** "
+                  "first — the launcher can't run from inside the zip.")
     else:  # links CSV
         df = pd.DataFrame([{"Team": r["team"], "Name": r["name"],
                             "Email": r.get("email", ""), "Link": r.get("link", "")}
@@ -976,7 +977,8 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
                  "Unzip it, then **double-click** `Send emails (Windows).cmd` on "
                  "Windows, or `send_all_mac.applescript` on Mac. Each student's "
                  "PDF is attached automatically.")
-                + " Keep the files together in the unzipped folder.")
+                + " On Windows, right-click the zip and choose **Extract All** "
+                  "first — the launcher can't run from inside the zip.")
     else:  # recipients CSV
         rows = []
         for t in teams:

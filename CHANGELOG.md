@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.17.2 — the Windows email pack, run from inside the zip
+
+Reported: running *Prepare drafts (Windows).cmd* from the downloaded zip
+showed `…\AppData\Local\Temp\…invitations_drafts.zip.d22\send_all_windows.ps1
+does not exist`, the PowerShell banner, and then **"All done."**
+
+**Cause.** Double-clicking a file *inside* a .zip makes Windows Explorer copy
+just that one file to a temporary folder and run it there. The engine
+(`send_all_windows.ps1`) and the PDFs stay in the zip, so there was nothing to
+run — and the launcher printed "All done" without checking.
+
+- **The launcher checks before it runs.** If the engine is not beside it, it
+  says nothing was prepared/sent and gives the three steps: close the window,
+  right-click the zip → *Extract All…*, double-click the launcher in the
+  folder that opens.
+- **"All done" only when it is.** The launcher reads PowerShell's exit code;
+  on failure it says so and points at the messages above (in a send pack, it
+  also warns that anything marked "sent" has already gone).
+- **The engine reports failure.** It exits 1 when Outlook cannot start and 2
+  when any message failed, with a count, instead of always finishing quietly.
+- **No more bare "your report is attached" emails.** If a student's PDF is
+  missing from the folder, that message is not sent or drafted and is reported
+  as a failure; before, it went out without the attachment.
+- The download caption now says to *Extract All* first on Windows.
+
+PowerShell and cmd are not available in the test environment, so the five new
+tests (433 total) check the generated scripts' structure: the existence check
+precedes the run, "All done" is reachable only past the exit-code check,
+batch-safe syntax (no parenthesised blocks — the launcher's own name has
+parentheses — and no redirect characters in echoed text), and the engine's
+exit codes and attachment guard.
+
 ## 2.17.1 — team edits that stick, and a new survey that starts empty
 
 Reported: *"when I save and make links live the changes I made to teams do not

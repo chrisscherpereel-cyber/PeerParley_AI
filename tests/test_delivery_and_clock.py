@@ -433,3 +433,79 @@ def test_counting_responses_does_not_read_them_all(tmp_path, monkeypatch):
     assert svy.response_count(v, "c-eval1") == 12
     assert reads["n"] == 0, "counting should not fetch a single response"
     assert len(svy.all_responses(v, "c-eval1")) == 12   # this one does read them
+
+
+# --------------------------------------------------------------------------- #
+# 4. The Windows launcher when it is run from inside the zip (2.17.2)
+# --------------------------------------------------------------------------- #
+# Double-clicking the .cmd inside the downloaded .zip makes Explorer copy just
+# that one file to %TEMP% and run it there — no engine, no PDFs. The launcher
+# used to hand PowerShell a missing file and then print "All done" anyway.
+
+def _launcher_lines(drafts: bool):
+    files = _pack(drafts)
+    name = "Prepare drafts (Windows).cmd" if drafts else "Send emails (Windows).cmd"
+    text = files[name]
+    assert "\r\n" in text, "a .cmd needs Windows line endings"
+    return name, [ln for ln in text.split("\r\n")]
+
+
+def test_the_launcher_checks_the_engine_is_beside_it_before_running():
+    for drafts in (False, True):
+        name, lines = _launcher_lines(drafts)
+        check = next(i for i, ln in enumerate(lines)
+                     if ln.startswith('if not exist "%~dp0send_all_windows.ps1"'))
+        run = next(i for i, ln in enumerate(lines) if ln.startswith("powershell "))
+        assert check < run
+        assert lines[check].endswith("goto notunzipped")
+        assert ":notunzipped" in lines
+        tail = "\n".join(lines[lines.index(":notunzipped"):])
+        assert "Extract All" in tail and name in tail
+        assert "exit /b 1" in tail and "pause" in tail
+        assert "All done" not in tail
+
+
+def test_the_launcher_says_all_done_only_when_the_engine_succeeded():
+    for drafts in (False, True):
+        _, lines = _launcher_lines(drafts)
+        run = next(i for i, ln in enumerate(lines) if ln.startswith("powershell "))
+        assert lines[run + 1] == "if errorlevel 1 goto failed"
+        done = [i for i, ln in enumerate(lines) if "All done" in ln]
+        assert len(done) == 1 and done[0] > run + 1
+        # the success path ends before the failure label begins
+        assert done[0] < lines.index("exit /b 0") < lines.index(":failed")
+        fail = "\n".join(lines[lines.index(":failed"):lines.index(":notunzipped")])
+        assert "All done" not in fail and "exit /b 1" in fail
+
+
+def test_the_launcher_is_safe_batch_syntax():
+    """No ( ) blocks — the launcher's own name has parentheses, which would end
+    a block early — and nothing in an echo that cmd would treat as a redirect."""
+    for drafts in (False, True):
+        _, lines = _launcher_lines(drafts)
+        for ln in lines:
+            assert not ln.rstrip().endswith("("), ln
+            assert not ln.lstrip().startswith(")"), ln
+            if ln.lower().startswith("echo"):
+                assert not any(c in ln for c in "<>|&%^"), ln
+
+
+def test_the_engine_reports_failure_through_its_exit_code():
+    for drafts in (False, True):
+        ps = _pack(drafts)["send_all_windows.ps1"]
+        outlook = ps[ps.index("New-Object -ComObject Outlook.Application"):]
+        catch = outlook[:outlook.index("$msgs = @(")]
+        assert "exit 1" in catch and "return" not in catch
+        assert "$failed++" in ps
+        assert "exit 2 }" in ps
+        assert ps.rstrip().endswith("exit 0")
+
+
+def test_a_missing_pdf_stops_that_message_instead_of_sending_it_bare():
+    for drafts in (False, True):
+        ps = _pack(drafts)["send_all_windows.ps1"]
+        assert "Test-Path -LiteralPath $p" in ps
+        assert "$missing += $a" in ps
+        guard = ps.index("if ($missing.Count) { throw")
+        action = ps.index("$mail.Save()" if drafts else "$mail.Send()")
+        assert guard < action
