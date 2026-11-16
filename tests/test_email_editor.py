@@ -93,7 +93,8 @@ def test_every_placeholder_the_help_advertises_is_actually_filled_in():
     """The caption lists them, so each one has to work — otherwise the app is
     telling the instructor to write something it will not substitute."""
     ctx = email_ui.sample_ctx("MGT 301", "1", [])
-    template = " ".join(email_ui.PLACEHOLDERS)
+    # As the app does it: the survey-wide dates first, then the per-student ones.
+    template, = email_ui.with_dates({}, " ".join(email_ui.PLACEHOLDERS))
     rendered = mail.render_template(template, ctx)
     assert not re.search(r"\{[A-Za-z_]+\}", rendered), rendered
 
@@ -199,7 +200,10 @@ def test_the_editor_and_previews_work_in_the_real_app(tmp_path, quill):
                  "PASS - the preview is rendered, not shown as markup",
                  "PASS - the preview fills in a real student's name",
                  "PASS - an HTML escape hatch is offered, not forced",
-                 "PASS - a placeholder nothing fills in is flagged before sending"):
+                 "PASS - a placeholder nothing fills in is flagged before sending",
+                 "PASS - the preview shows the close date",
+                 "PASS - a date the survey does not have is warned about",
+                 "PASS - an unsaved date change is pointed out"):
         assert line in done.stdout, done.stdout[-5000:]
     if quill:
         assert ("PASS - with the package the body is not edited as HTML"
@@ -207,3 +211,64 @@ def test_the_editor_and_previews_work_in_the_real_app(tmp_path, quill):
     else:
         assert ("PASS - and it says which package would give the toolbar"
                 in done.stdout), done.stdout[-5000:]
+
+
+# --------------------------------------------------------------------------- #
+# {open_date} and {close_date} (2.18.0)
+# --------------------------------------------------------------------------- #
+# Requested: open and close dates usable in the notes to students, alongside
+# {first_name}, {team}, {link} and the rest.
+
+SCHED = {"opens_at": "2026-11-16T08:00:00", "closes_at": "2026-11-20T17:00:00"}
+
+
+def test_dates_read_the_way_a_student_reads_a_deadline():
+    assert email_ui.when("2026-11-20T17:00:00") == "Friday, November 20, 2026 at 5:00 PM"
+    assert email_ui.when("2026-11-02T00:05:00") == "Monday, November 2, 2026 at 12:05 AM"
+    assert email_ui.when("2026-11-02T12:00:00") == "Monday, November 2, 2026 at 12:00 PM"
+    assert email_ui.when("") == "" and email_ui.when("not a date") == ""
+
+
+def test_the_date_placeholders_are_known_and_listed():
+    for ph in ("{open_date}", "{close_date}"):
+        assert ph in email_ui.PLACEHOLDERS
+    assert email_ui.unfilled_placeholders("by {close_date}, from {open_date}") == []
+
+
+def test_with_dates_fills_both_and_leaves_the_per_student_ones():
+    subj, body = email_ui.with_dates(
+        SCHED, "Due {close_date}", "Hi {first_name}, opens {open_date}: {link}")
+    assert subj == "Due Friday, November 20, 2026 at 5:00 PM"
+    assert body == ("Hi {first_name}, opens Monday, November 16, 2026 at "
+                    "8:00 AM: {link}")
+
+
+def test_a_date_the_survey_lacks_reads_tba_and_is_warned_about():
+    subj, = email_ui.with_dates({}, "Due {close_date}")
+    assert subj == "Due TBA"
+    warn = email_ui.date_warnings(["Due {close_date}"], {})
+    assert len(warn) == 1 and "no close date" in warn[0]
+    # A message that does not use the date is not nagged about it.
+    assert email_ui.date_warnings(["Hi {first_name}"], {}) == []
+
+
+def test_an_unsaved_date_change_is_flagged_and_the_saved_date_used():
+    screen = dict(SCHED, closes_at="2026-11-22T17:00:00")
+    warn = email_ui.date_warnings(["Due {close_date}"], SCHED, screen)
+    assert len(warn) == 1 and "not saved" in warn[0]
+    assert "Friday, November 20, 2026 at 5:00 PM" in warn[0]
+    assert email_ui.date_warnings(["Due {close_date}"], SCHED, dict(SCHED)) == []
+
+
+def test_every_send_path_gets_the_dates():
+    """Filled once, before the template reaches any path: the .eml files and
+    the auto-send scripts render it again per student and must not undo it."""
+    from peerparley import emailpack
+    subj, body = email_ui.with_dates(SCHED, "Due {close_date}",
+                                     "Hi {first_name} — by {close_date}: {link}")
+    parts = emailpack.invite_parts(
+        [{"name": "Ann Apple", "email": "ann@example.edu", "team": "1",
+          "link": "https://pp.example/?t=x"}], subj, body, "EM101", "1")
+    assert parts[0]["subject"] == "Due Friday, November 20, 2026 at 5:00 PM"
+    assert parts[0]["body"] == ("Hi Ann — by Friday, November 20, 2026 at "
+                                "5:00 PM: https://pp.example/?t=x")

@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.18.0 — `{open_date}` and `{close_date}` in emails to students
+
+Requested: open and close dates usable in the notes to students, like
+`{first_name}`, `{team}` and `{link}`.
+
+- **Two new placeholders** for the invitation, the reminder and the results
+  email: `{open_date}` and `{close_date}`, written out as *Friday, November 20,
+  2026 at 5:00 PM* — weekday, because that is how people remember a deadline;
+  time, because "by Friday" alone is ambiguous. They use the same clock the
+  survey opens and closes by, so the email and the form agree.
+- **They quote the saved schedule.** Students' links obey the saved survey, so
+  that is what the email promises. A date changed on tab ① but not yet saved
+  gets a warning above the send button naming the date the email will use.
+- **A date the survey does not have is caught.** Using `{close_date}` with no
+  close date set warns before sending; if sent anyway it reads "TBA" rather
+  than leaving braces in forty inboxes.
+- Filled in once, before the message reaches any send path, so Outlook/Graph,
+  SMTP, the mail-app links, .eml files, the auto-send scripts, the CSV and the
+  preview all carry the same dates. The placeholder list under each editor and
+  a note under the schedule on tab ① say they exist.
+
+6 new tests (439 total), plus 9 new checks in the real-app email driver: dates
+in the preview, the no-schedule warning and the unsaved-change warning.
+
 ## 2.17.2 — the Windows email pack, run from inside the zip
 
 Reported: running *Prepare drafts (Windows).cmd* from the downloaded zip

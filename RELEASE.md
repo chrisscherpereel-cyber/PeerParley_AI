@@ -1,6 +1,6 @@
 # Release checklist
 
-What was validated before 2.17.2, and what to re-run before any future
+What was validated before 2.18.0, and what to re-run before any future
 release. Everything here is a command, so the answer is never a matter of
 opinion.
 
@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 433 passed
+python3 -m pytest tests/ -q          # expect: 439 passed
 python3 qa_regression.py             # expect: 95/95 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```

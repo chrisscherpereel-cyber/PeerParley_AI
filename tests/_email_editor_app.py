@@ -74,6 +74,12 @@ def main(workdir: str, no_quill: bool = False) -> int:
                                 dict(survey.DEFAULT_SURVEY),
                                 vault=vault, owner="admin")
 
+    # A second survey with a schedule, for {open_date} / {close_date}.
+    _sched = dict(survey.DEFAULT_SURVEY, opens_at="2026-11-16T08:00:00",
+                  closes_at="2026-11-20T17:00:00")
+    slug2, _ = survey.save_setup("EM101", "2", pd.DataFrame(rows), _sched,
+                                 vault=vault, owner="admin")
+
     from streamlit.testing.v1 import AppTest
 
     def boot(**state):
@@ -152,6 +158,44 @@ def main(workdir: str, no_quill: bool = False) -> int:
     labels = [str(getattr(e, "label", "")) for e in app.expander]
     check("the reminder panel exists",
           any("reminder to non-responders" in s for s in labels), str(labels))
+
+    # ---- {open_date} / {close_date} (2.18.0) -----------------------------
+    dated = "Opens {open_date}. Please finish by {close_date}. {link}"
+    app = boot(new_eval="2", inv_body_html=dated)
+    check("a scheduled survey renders with dates", not app.exception,
+          str([str(e.value)[:200] for e in app.exception]))
+    shown = " ".join(str(getattr(m, "value", "")) for m in app.markdown)
+    check("the preview shows the open date",
+          "Monday, November 16, 2026 at 8:00 AM" in shown, shown[:300])
+    check("the preview shows the close date",
+          "Friday, November 20, 2026 at 5:00 PM" in shown, shown[:300])
+    check("no placeholder is left in the preview",
+          "{open_date}" not in shown and "{close_date}" not in shown)
+    warned = " ".join(str(getattr(w, "value", "")) for w in app.warning)
+    check("the date placeholders are not flagged as unknown",
+          "{close_date}" not in warned, warned[:300])
+    help_text = " ".join(str(getattr(c, "value", "")) for c in app.caption)
+    check("the placeholder help lists them",
+          "{open_date}" in help_text and "{close_date}" in help_text)
+
+    # A survey with no schedule: say so before "TBA" reaches forty inboxes.
+    app = boot(inv_body_html=dated)
+    warned = " ".join(str(getattr(w, "value", "")) for w in app.warning)
+    check("a date the survey does not have is warned about",
+          "no close date" in warned and "no open date" in warned, warned[:300])
+
+    # Changed on screen but not saved: the email quotes the saved date, and
+    # says so — the saved one is when the form really closes.
+    _edited = dict(_sched, closes_at="2026-11-22T17:00:00")
+    app = boot(new_eval="2", inv_body_html=dated,
+               _cfg_loaded_for=slug2, survey_cfg=_edited,
+               close_d=__import__("datetime").date(2026, 11, 22))
+    warned = " ".join(str(getattr(w, "value", "")) for w in app.warning)
+    check("an unsaved date change is pointed out",
+          "changed but not saved" in warned, warned[:300])
+    shown = " ".join(str(getattr(m, "value", "")) for m in app.markdown)
+    check("and the message keeps the saved date",
+          "Friday, November 20, 2026 at 5:00 PM" in shown, shown[:300])
 
     print("FAILURES:", FAILURES or "none")
     return 1 if FAILURES else 0

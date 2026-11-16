@@ -38,6 +38,7 @@ from typing import Dict, List, Optional
 import streamlit as st
 
 from . import email_delivery as mail
+from .survey import parse_dt
 
 PLACEHOLDERS = {
     "{first_name}": "the student's first name",
@@ -47,7 +48,16 @@ PLACEHOLDERS = {
     "{class}": "the course label you typed on tab ①",
     "{eval_no}": "the evaluation number",
     "{link}": "their own personal evaluation link",
+    "{open_date}": "when the survey opens — date and time, from the schedule on tab ①",
+    "{close_date}": "when it closes — date and time, from the schedule on tab ①",
 }
+
+# The two that are the same for every student: they come from the survey's
+# schedule, not from the student, so they are filled into the template once
+# (`with_dates`) before it reaches any send path — Outlook, SMTP, .eml files,
+# the auto-send scripts, the CSV and the preview all get the same text.
+DATE_FIELDS = {"{open_date}": "opens_at", "{close_date}": "closes_at"}
+NOT_SCHEDULED = "TBA"
 
 # Quill's own toolbar, trimmed to what an instructor writing to a class needs.
 # Fonts, colours and embedded video are the parts that render badly in Outlook
@@ -90,6 +100,70 @@ def sample_ctx(course: str, eval_no: str,
         "eval_no": str(eval_no or "1"),
         "link": (first or {}).get("link", "https://your-peerparley-address/?t=…"),
     }
+
+
+def when(value) -> str:
+    """A schedule time as a student should read it.
+
+    "Friday, November 20, 2026 at 5:00 PM" — the weekday because that is how
+    people remember a deadline, the time because a date alone leaves "by
+    Friday" open to midnight or 8am. On the instructor's clock, the same one
+    the survey uses to open and close, so the email and the form agree.
+    """
+    d = parse_dt(value)
+    if d is None:
+        return ""
+    hour = d.strftime("%I").lstrip("0") or "12"
+    return f"{d:%A, %B} {d.day}, {d.year} at {hour}:{d:%M %p}"
+
+
+def date_ctx(survey_cfg: Optional[dict]) -> Dict[str, str]:
+    """``{"open_date": …, "close_date": …}``; ``TBA`` for a date not set."""
+    cfg = survey_cfg or {}
+    return {ph.strip("{}"): (when(cfg.get(field)) or NOT_SCHEDULED)
+            for ph, field in DATE_FIELDS.items()}
+
+
+def with_dates(survey_cfg: Optional[dict], *templates: str) -> List[str]:
+    """The templates with ``{open_date}`` / ``{close_date}`` filled in."""
+    ctx = date_ctx(survey_cfg)
+    return [mail.render_template(t or "", ctx) for t in templates]
+
+
+def date_warnings(templates: List[str], saved_cfg: Optional[dict],
+                  screen_cfg: Optional[dict] = None) -> List[str]:
+    """What is wrong with the dates a message is about to promise, in words.
+
+    Two ways the email and the form could disagree: a date the message uses
+    that the survey has no value for (it would read "closes TBA"), and a date
+    changed on tab ① but not saved — students' links follow the SAVED
+    schedule, so that is the one the message must quote.
+    """
+    text = " ".join(t or "" for t in templates)
+    saved, screen = saved_cfg or {}, screen_cfg
+    out: List[str] = []
+    for ph, field in DATE_FIELDS.items():
+        if ph not in text:
+            continue
+        what = "open" if field == "opens_at" else "close"
+        if not parse_dt(saved.get(field)):
+            out.append(f"`{ph}` is in this message but the saved survey has no "
+                       f"{what} date, so students would read \"{NOT_SCHEDULED}\". "
+                       f"Set one under **Schedule** on tab ① and save, or take "
+                       f"`{ph}` out.")
+        elif (screen is not None
+              and (screen.get(field) or "") != (saved.get(field) or "")):
+            out.append(f"The {what} date on tab ① has been changed but not "
+                       f"saved. This message uses the saved one — "
+                       f"**{when(saved.get(field))}** — which is also when the "
+                       f"form really {what}s. Save on tab ① to use the new one.")
+    return out
+
+
+def warn_dates(templates: List[str], saved_cfg: Optional[dict],
+               screen_cfg: Optional[dict] = None) -> None:
+    for msg in date_warnings(templates, saved_cfg, screen_cfg):
+        st.warning(msg, icon="📅")
 
 
 def placeholder_help() -> None:

@@ -230,6 +230,13 @@ have. Placeholders — `{first_name}`, `{last_name}`, `{name}`, `{team}`,
 name that is *not* one of them is flagged above the send button, since it would
 otherwise reach every student exactly as typed.
 
+Two more come from the survey's schedule rather than the student:
+`{open_date}` and `{close_date}`, written out as *Friday, November 20, 2026 at
+5:00 PM* on the same clock the survey opens and closes by. They quote the
+**saved** schedule, because that is the one students' links obey: a date
+changed on tab ① but not yet saved is pointed out above the send button, and
+so is a placeholder for a date the survey does not have (it would read "TBA").
+
 ## Privacy / storage
 
 Responses are written to the **same encrypted vault** as the rest of the app

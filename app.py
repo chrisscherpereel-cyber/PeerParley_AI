@@ -1592,6 +1592,10 @@ with tabs[0]:
             cur["closes_at"] = dt.datetime.combine(cd, ct).isoformat()
         else:
             cur["closes_at"] = ""
+        st.caption("Write `{open_date}` or `{close_date}` in an email to "
+                   "students and these dates are filled in — e.g. *Please "
+                   "finish by {close_date}.* The emails quote the **saved** "
+                   "schedule, so save after changing a date.")
     S["survey_cfg"] = cur
 
     _state = survey.window_state(cur)
@@ -1766,6 +1770,12 @@ with tabs[0]:
                              "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
         body = _email_body(DEFAULT_INVITE_BODY, key="inv_body")
         email_ui.warn_unfilled(subj, body)
+        # {open_date}/{close_date} come from the SAVED schedule — the one the
+        # links obey — and are filled in once here, so every send path below
+        # gets the same dates.
+        _saved_cfg = survey.load_survey(vault_now(), slug)
+        email_ui.warn_dates([subj, body], _saved_cfg, cur)
+        subj, body = email_ui.with_dates(_saved_cfg, subj, body)
         email_ui.preview(subj, body,
                          email_ui.sample_ctx(course, eval_no, links))
         _link_delivery("inv", links, subj, body, course, eval_no, bool(base_url.strip()),
@@ -1857,6 +1867,8 @@ with tabs[1]:
                           "starts working.", icon="🔗")
                     _recips = [r for r in _recips if r["link"]]
                 email_ui.warn_unfilled(subj, body)
+                email_ui.warn_dates([subj, body], _svy, S.get("survey_cfg"))
+                subj, body = email_ui.with_dates(_svy, subj, body)
                 email_ui.preview(subj, body,
                                  email_ui.sample_ctx(course, eval_no, _recips))
                 _link_delivery("rem", _recips, subj, body, course, eval_no,
@@ -2274,6 +2286,9 @@ with tabs[4]:
         # app, and the two messages a whole section actually receives had none.
         sample = S["teams"][0].members[0]
         email_ui.warn_unfilled(subject_t, body_t)
+        _saved_cfg = survey.load_survey(vault_now(), survey.slugify(course, eval_no))
+        email_ui.warn_dates([subject_t, body_t], _saved_cfg, S.get("survey_cfg"))
+        subject_t, body_t = email_ui.with_dates(_saved_cfg, subject_t, body_t)
         email_ui.preview(subject_t, body_t, _ctx(sample, course, eval_no))
 
         report = _report_settings(course, eval_no)
