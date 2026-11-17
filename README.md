@@ -18,9 +18,10 @@ approve it. Off by default, and off again every time you sign in. See
 
 ### If someone has just handed you this app
 
-Sign in, and open **Start here** at the top of the page. It is a five-step
-checklist ticked off from what you have actually done, and each unfinished step
-names the one button that completes it. You need a contact list — names, emails
+Sign in, pick a survey in the sidebar (or start a new one), and open **Start
+here** at the top of the page. It is a short checklist ticked off from what
+you have actually done on that survey, and each unfinished step names the one
+button that completes it. You need a contact list — names, emails
 and teams, one row per student — and nothing else; the template is on tab ①.
 Three things are worth knowing before you click:
 
@@ -155,7 +156,7 @@ switch it on there. It is off every time you sign in, by design. Full guide:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/ -q     # 439 tests, fully offline
+python3 -m pytest tests/ -q     # 446 tests, fully offline
 python3 qa_regression.py        # 93 checks driving the real app, headless
 python3 selfcheck.py            # is this installation usable?
 ```

@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.19.1 — Start here drops the step that is always done
+
+Asked: *"do we still need ✅ Enter this app's web address in the start here
+menu when this is entered by default."*
+
+No. The address is read from the browser, so on any normal visit it is known
+before the instructor does anything and the line was a permanent tick. It is
+now left out of the checklist (four steps), and appears only when the address
+really cannot be found and nobody has typed one — then it is a genuine step,
+because the student links need it.
+
+2 new checks in the page driver (test count unchanged at 446).
+
+## 2.19.0 — send through web mail; Start here waits for a survey
+
+Requested: *"when a user logs into peer parley they should not see progress in
+the start here since no survey has been selected. Is there a way to setup a
+send option that will use a web based mail tool?"*
+
+**Start here.** Right after signing in no survey is chosen, yet the panel
+showed ticks — from things that are not about any survey (the app's address
+is known; a survey saved with a blank course has the same name as an empty
+sidebar). Until a survey is picked, or a course typed for a new one, the panel
+now says only *choose a survey* and shows no progress. Also fixed: the step
+number was "how many are done, plus one", so a new survey whose address was
+already known read *step 2 of 5* with step 1 still open; it is now the first
+unfinished step.
+
+**Open in web mail — Outlook or Gmail.** A new method on the invitation, the
+reminder and the results email, for instructors who work in the browser and
+cannot get the Microsoft 365 app registration from IT. One button per student
+opens a pre-filled message in **Outlook on the web** or **Gmail** in a new tab;
+the instructor presses Send there, from their own address. A *Sent* tick per
+student keeps count through a long list (this visit only). Its limits are said
+on the page: one click per student, plain text, no attachments — on the results
+email a warning says no PDF goes with it, and another appears if the message
+says something is "attached".
+
+**Plain text keeps the links.** Converting a message to plain text (web mail,
+mailto links, the preview's plain-text version) used to drop every link's
+address with its tag — *Open my peer evaluation* arrived as words with nowhere
+to go. The address is now written after the words; lists become bullets and
+entities (`&amp;`) are decoded.
+
+7 new tests (446 total), including a real-app driver for the panel before and
+after choosing a survey and for the web-mail buttons, Gmail and the tick count;
+the every-state matrix now also opens the new method in every state.
+
 ## 2.18.0 — `{open_date}` and `{close_date}` in emails to students
 
 Requested: open and close dates usable in the notes to students, like

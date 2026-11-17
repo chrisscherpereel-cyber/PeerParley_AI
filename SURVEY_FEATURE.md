@@ -153,6 +153,17 @@ or SMTP password is needed and the mail comes from your address. *Microsoft 365
 sending from the app itself, along with .eml files, mailto links and a CSV for
 your own mail merge.
 
+**Web mail, with nothing to set up.** *Open in web mail — Outlook or Gmail*
+lists one button per student. Each opens a new message in **Outlook on the
+web** (Microsoft 365 work or school mailbox) or **Gmail**, in a new browser
+tab, addressed and filled in; you press Send there, from your own address. A
+*Sent* tick beside each button keeps count while you work through the list
+(for this visit only). What the method cannot do: it is one click per student,
+the message is plain text (formatting is dropped but every link is written out
+in full, so the student's link still works), and nothing can be attached — on
+the results email it says so in a warning, and warns again if the message
+claims something is attached.
+
 Every method that can send offers **"prepare them for me to look over first"**,
 ticked by default. It is not cosmetic: Graph writes Outlook drafts, SMTP hands
 back a zip of ready-to-send files, and the auto-send scripts call Outlook's

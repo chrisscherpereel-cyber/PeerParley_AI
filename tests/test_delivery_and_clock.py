@@ -60,11 +60,13 @@ def test_auto_send_scripts_are_the_default_for_both_kinds_of_email():
     # And nothing was lost in the reordering.
     assert set(lists["_LINK_METHODS"]) == {
         "Download auto-send scripts (Mac / Windows)", "Microsoft 365 — send now",
-        "SMTP — send now", "Open in my mail app (mailto)", "Download .eml files",
+        "SMTP — send now", "Open in web mail — Outlook or Gmail",
+        "Open in my mail app (mailto)", "Download .eml files",
         "Download links CSV"}
     assert set(lists["_RESULT_METHODS"]) == {
         "Download auto-send scripts (Mac / Windows)", "Microsoft 365 — send now",
-        "SMTP — send now", "Download .eml files", "Download recipients CSV"}
+        "SMTP — send now", "Open in web mail — Outlook or Gmail (no PDF)",
+        "Download .eml files", "Download recipients CSV"}
 
 
 def test_every_sending_method_offers_a_review_step():
@@ -76,8 +78,9 @@ def test_every_sending_method_offers_a_review_step():
     # branches, through _review_first — four offers in all.
     assert text.count("_review_first(") >= 3
     assert "REVIEW_LABEL" in text
-    # The methods that cannot send anything say so where the checkbox would be.
-    assert text.count("Nothing is sent by this method") == 3
+    # The methods that cannot send anything say so where the checkbox would be:
+    # mailto, the two .eml branches, and web mail (one panel, both emails).
+    assert text.count("Nothing is sent by this method") == 4
 
 
 # --------------------------------------------------------------------------- #

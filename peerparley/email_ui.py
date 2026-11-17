@@ -72,12 +72,13 @@ TOOLBAR = [
 
 
 def html_to_text(html: str) -> str:
-    """A plain-text rendering, for a mail client that will not show HTML."""
-    text = re.sub(r"<br\s*/?>", "\n", html or "")
-    text = re.sub(r"</p\s*>", "\n\n", text, flags=re.I)
-    text = re.sub(r"<[^>]+>", "", text)
-    return (text.replace("&nbsp;", " ").replace("&amp;", "&")
-            .replace("&lt;", "<").replace("&gt;", ">").strip())
+    """A plain-text rendering, for a mail client that will not show HTML.
+
+    Shared with the mailto and web-mail links (``webmail.plain_text``), which
+    keeps each link's address written out instead of dropping it with the tag.
+    """
+    from .webmail import plain_text
+    return plain_text(html)
 
 
 def sample_ctx(course: str, eval_no: str,

@@ -20,6 +20,7 @@ directly (see peerparley/survey.py), bypassing the instructor password gate.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import datetime as dt
 import io
 import os
@@ -40,6 +41,7 @@ from peerparley import survey
 from peerparley import roster_ui
 from peerparley import email_ui
 from peerparley import emailpack
+from peerparley import webmail
 from peerparley import ai_ui
 from peerparley import setup_wizard
 from peerparley import webcontext
@@ -759,12 +761,66 @@ above their team.
 def _mailto(to, subject, body_html):
     """A mailto: URL that opens the computer's default mail app pre-filled.
     Body is converted to plain text (mailto can't carry HTML or attachments)."""
-    text = re.sub(r"<br\s*/?>", "\n", body_html or "")
-    text = re.sub(r"</p>", "\n\n", text)
-    text = re.sub(r"<[^>]+>", "", text).replace("&nbsp;", " ")
-    q = urllib.parse.urlencode({"subject": subject or "", "body": text},
+    q = urllib.parse.urlencode({"subject": subject or "",
+                                "body": webmail.plain_text(body_html)},
                                quote_via=urllib.parse.quote)
     return f"mailto:{to}?{q}"
+
+
+def _webmail_panel(key, items, results=False):
+    """One "open in web mail" button per student, with a tick to keep count.
+
+    `items` are finished messages — ``{"name", "email", "subject", "body"}``
+    with every placeholder already filled — so this shows exactly what each
+    student gets. Nothing is sent from here: each button opens a new message
+    in Outlook on the web or Gmail, in the instructor's own mailbox, and they
+    press Send there. With forty students that is forty clicks, so the ticks
+    (session-only) say which ones are done when a tab gets closed half way.
+    """
+    provider = st.radio("Which web mail do you use?", list(webmail.PROVIDERS),
+                        key=f"{key}_wm_p", horizontal=True,
+                        captions=list(webmail.PROVIDERS.values()))
+    st.caption(
+        "✓ Nothing is sent by this method. Each button opens a new message in "
+        f"{provider}, in a new browser tab, with the address, subject and text "
+        "filled in — read it and press **Send** there. Sign in to the right "
+        "account first. The message is plain text: formatting is dropped, but "
+        "every link is written out in full so it still works.")
+    if results:
+        st.warning(
+            "**No PDF is attached this way** — web mail cannot take an "
+            "attachment from a link, so each student gets only the text of "
+            "this message. Send the reports another way (the .eml files or the "
+            "auto-send scripts attach them), or make sure the message does not "
+            "tell them a report is attached.", icon="📎")
+        if any(re.search(r"\battach", (it.get("body") or "") + " "
+                         + (it.get("subject") or ""), re.I) for it in items[:1]):
+            st.warning("Your message says something is **attached**. With web "
+                       "mail nothing will be — change the wording first.",
+                       icon="⚠️")
+    sendable = [it for it in items if it.get("email")]
+    missing = [it["name"] for it in items if not it.get("email")]
+    if not sendable:
+        st.info("No recipients with an email address.")
+        return
+    done_keys = []
+    for it in sendable:
+        tick = (f"{key}_wm_sent_"
+                + hashlib.sha1(it["email"].strip().lower().encode()).hexdigest()[:12])
+        done_keys.append(tick)
+        c1, c2 = st.columns([4, 1], vertical_alignment="center")
+        c1.link_button(f"✉️ {it['name']} — {it['email']}",
+                       webmail.compose_url(provider, it["email"], it["subject"],
+                                           it["body"]),
+                       **FULL_WIDTH)
+        c2.checkbox("Sent", key=tick)
+    n_done = sum(1 for k in done_keys if st.session_state.get(k))
+    st.caption(f"**{n_done} of {len(sendable)}** ticked as sent. The ticks are "
+               "only a checklist for this visit — they are not saved, and they "
+               "don't check your mailbox.")
+    if missing:
+        st.caption("No email address for: " + ", ".join(missing[:10])
+                   + ("…" if len(missing) > 10 else ""))
 
 
 def _mail_app_links(recipients, subject_t, body_t, course, eval_no, limit=80):
@@ -797,10 +853,12 @@ def _mail_app_links(recipients, subject_t, body_t, course, eval_no, limit=80):
 # own computer, and the messages then come from their own address.
 _LINK_METHODS = ["Download auto-send scripts (Mac / Windows)",
                  "Microsoft 365 — send now", "SMTP — send now",
+                 "Open in web mail — Outlook or Gmail",
                  "Open in my mail app (mailto)", "Download .eml files",
                  "Download links CSV"]
 _RESULT_METHODS = ["Download auto-send scripts (Mac / Windows)",
                    "Microsoft 365 — send now", "SMTP — send now",
+                   "Open in web mail — Outlook or Gmail (no PDF)",
                    "Download .eml files", "Download recipients CSV"]
 
 # Ticked by default, on every method. "Prepare" means different machinery in
@@ -865,6 +923,18 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
                         body=mail.render_template(body, ctx), attachments=[]))
                 _deliver(msgs, api, drafts, ok_label=f"{label} delivered",
                          key=key)
+    elif m.startswith("Open in web mail"):
+        items = []
+        for r in recipients:
+            _nm = r.get("name", "") or ""
+            ctx = {"first_name": (_nm.split() or [""])[0],
+                   "last_name": _nm.split()[-1] if len(_nm.split()) > 1 else "",
+                   "name": _nm, "team": str(r.get("team", "")),
+                   "eval_no": eval_no, "class": course, "link": r.get("link", "")}
+            items.append({"name": r.get("name", ""), "email": r.get("email", ""),
+                          "subject": mail.render_template(subj, ctx),
+                          "body": mail.render_template(body, ctx)})
+        _webmail_panel(key, items)
     elif m.startswith("Open in my mail app"):
         st.caption("✓ Nothing is sent by this method: each link opens a message "
                    "in your own mail app for you to read and send.")
@@ -936,6 +1006,17 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
                                    report=report, narratives=narratives,
                                    reports=reports)
             _deliver(msgs, api, drafts, ok_label="Feedback delivered", key=key)
+    elif m.startswith("Open in web mail"):
+        items = []
+        for t in teams:
+            for mm in t.members:
+                cx = _ctx(mm, course, eval_no)
+                rec = roster.match(mm.name) if roster else None
+                items.append({"name": mm.name,
+                              "email": (rec or {}).get("email", ""),
+                              "subject": mail.render_template(subj, cx),
+                              "body": mail.render_template(body, cx)})
+        _webmail_panel(key, items, results=True)
     elif m.startswith("Download .eml"):
         st.caption("✓ Nothing is sent by this method: you get a file per student "
                    "to open, read and send from your own mail app.")
@@ -1131,7 +1212,22 @@ _scroll_to_top()
 # were in it, and nothing in the app said which step was unfinished. Each line
 # below is driven by real state and names the one thing that completes it, so
 # the sequence is visible without reading anything.
-def _start_here(course: str, eval_no: str) -> None:
+def _start_here(course: str, eval_no: str, chosen: bool = True) -> None:
+    if not chosen:
+        # Nothing picked yet — the state every instructor is in right after
+        # signing in. Ticks here used to come from things that are not about
+        # any survey (the app's address is known, a blank course slug that
+        # happened to exist), so the panel showed progress on a survey nobody
+        # had chosen. Until one is chosen, the only step is choosing.
+        with st.expander("**Start here — choose a survey**", expanded=True):
+            st.markdown(
+                "👈 **Pick a survey in the sidebar** to carry on with it, or "
+                "choose **➕ New survey…** and type the course / section to "
+                "start one. Your progress on that survey appears here.")
+            st.caption("Then: upload the contact list and save the survey "
+                       "(tab ①), email the links, collect responses (tab ②), "
+                       "and grade and send the reports (tabs ④ and ⑤).")
+        return
     slug_now = survey.slugify(course, eval_no)
     try:
         snap = survey.load_roster_snapshot(vault_now(), slug_now)
@@ -1153,16 +1249,28 @@ def _start_here(course: str, eval_no: str) -> None:
         (saved, "Save the survey",
          "tab ① — the button under the questions; this is what makes the "
          "student links work"),
-        (have_url, "Enter this app's web address",
-         "tab ① — copy it from your browser's address bar, then email the links"),
         (responses > 0, f"Collect responses ({responses} in so far)"
          if saved else "Collect responses",
          "tab ② — watch who has answered and remind the rest"),
         (loaded, "Grade and send the reports",
          "tab ② to load the answers, then ④ for grades and ⑤ to send feedback"),
     ]
+    # The app's address is read from the browser, so on any normal visit it is
+    # already known and this step was a permanent tick that asked nothing of
+    # anybody. It is listed only when it really is missing (an unusual host,
+    # or an old Streamlit that cannot see the page address) — then it is the
+    # one thing standing between the saved survey and working links.
+    if not have_url:
+        steps.insert(2, (False, "Enter this app's web address",
+                         "tab ① — copy it from your browser's address bar, "
+                         "then email the links"))
     done = sum(1 for ok, *_ in steps if ok)
-    with st.expander(f"**Start here — step {min(done + 1, len(steps))} of "
+    # The step you are on is the first one not done — not "how many are done,
+    # plus one": the address is often known before anything else is, which
+    # made a brand-new survey read "step 2 of 5" with step 1 still open.
+    current = next((i for i, (ok, *_) in enumerate(steps) if not ok),
+                   len(steps) - 1) + 1
+    with st.expander(f"**Start here — step {current} of "
                      f"{len(steps)}**", expanded=done < len(steps)):
         for ok, label, where in steps:
             st.markdown(f"{'✅' if ok else '⬜️'} **{label}** — {where}"
@@ -1173,7 +1281,8 @@ def _start_here(course: str, eval_no: str) -> None:
                    "sees it. It stays off until you switch it on.")
 
 
-_start_here(course, eval_no)
+_start_here(course, eval_no,
+            chosen=(choice != "➕ New survey…") or bool((course or "").strip()))
 
 tabs = st.tabs([
     "① Set up survey", "② Collect responses", "③ Grading rules",
