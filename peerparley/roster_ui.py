@@ -136,8 +136,8 @@ def _fragment(fn):
     requirements.txt allows Streamlit from 1.36, and `st.fragment` arrived in
     1.37, hence the fallback.
     """
-    frag = getattr(st, "fragment", None)
-    return frag(fn) if callable(frag) else fn
+    from .ui_helpers import as_fragment
+    return as_fragment(fn)
 
 
 @_fragment

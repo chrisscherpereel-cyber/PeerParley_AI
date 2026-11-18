@@ -619,6 +619,92 @@ def save_setup(course: str, eval_no: str, contact_df: pd.DataFrame,
     return slug, body["teams"]
 
 
+# What a new round must not inherit from the round it was copied from: when it
+# opens and closes. Everything else on the survey — the questions, the report
+# settings, the instructor's clock — is the instructor's way of running this
+# course and carries over.
+ROUND_RESET = {"opens_at": "", "closes_at": "", "is_open": True}
+
+
+def round_candidates(surveys: List[dict], course: str,
+                     exclude_slug: str = "") -> List[dict]:
+    """Saved surveys a new round could start from, best guess first.
+
+    The same course before any other, latest round first — "Eval 2 of MGT 301"
+    almost always wants Eval 1 of MGT 301 — then everything else the instructor
+    can see, for a section that changed its label between rounds.
+    """
+    want = name_key(course or "")
+
+    def _num(s):
+        try:
+            return float(str(s.get("eval_no", "")).strip())
+        except ValueError:
+            return float("-inf")
+
+    pool = [s for s in surveys
+            if s.get("slug") != exclude_slug and s.get("students", 0) > 0]
+    same = sorted([s for s in pool if want and name_key(s.get("course", "")) == want],
+                  key=_num, reverse=True)
+    rest = sorted([s for s in pool if s not in same],
+                  key=lambda s: (str(s.get("course", "")), -_num(s)))
+    return same + rest
+
+
+def start_round_from(vault: Vault, source_slug: str, course: str,
+                     eval_no: str, owner: str = "") -> Tuple[str, Dict]:
+    """Start a new round (course + eval) from a saved one, in one step.
+
+    Requested: a second round of peer evaluations "built on the current
+    student team setup". Changing the evaluation number alone opened an empty
+    survey: the uploader asked for the spreadsheet again — the original one,
+    without any move, addition or removal made under 👥 Teams since — and the
+    questions and report settings went back to the defaults.
+
+    Copied: the teams **as they stand now** (edits included), the students on
+    no team, and the survey settings. Not copied: the open/close dates (a new
+    round has its own), the responses, and the students' ids — every student
+    gets a fresh id, so the new links are new and nothing from one round can
+    open or overwrite the other. Refuses to write over a round that already
+    has a saved student list.
+
+    Returns ``(slug, summary)`` with ``teams``, ``students`` and
+    ``unassigned`` counts.
+    """
+    slug = slugify(course, eval_no)
+    if slug == source_slug:
+        raise ValueError("That is the same survey — choose a different "
+                         "evaluation number for the new round.")
+    if load_roster_snapshot(vault, slug) is not None:
+        raise ValueError(f"{course} · Evaluation {eval_no} already has a saved "
+                         "student list, so nothing was copied over it.")
+    src = roster_now(vault, source_slug)
+    if not src:
+        raise ValueError("The survey to copy from has no saved student list.")
+
+    keep = ("name", "first", "last", "email", "class", "section")
+
+    def _fresh(m: dict) -> dict:
+        rec = {k: m.get(k, "") for k in keep}
+        rec["id"] = new_member_id()
+        return rec
+
+    teams = {str(t): [_fresh(m) for m in (ms or [])]
+             for t, ms in (src.get("teams", {}) or {}).items() if ms}
+    loose = [_fresh(m) for m in (src.get("unassigned", []) or [])]
+    cfg = {**DEFAULT_SURVEY, **load_survey(vault, source_slug), **ROUND_RESET}
+    # The roster is written last: it is what makes a survey count as saved,
+    # so a failure part way leaves no half-made round behind it.
+    _save_json(vault, key_survey(slug), cfg)
+    _save_json(vault, key_roster(slug),
+               {"course": course, "eval_no": eval_no, "teams": teams,
+                "unassigned": loose, "owner": owner or "",
+                "schema": ROSTER_SCHEMA, "copied_from": source_slug})
+    return slug, {"teams": len(teams),
+                  "students": sum(len(v) for v in teams.values()),
+                  "unassigned": len(loose)}
+
+
 def save_config(course: str, eval_no: str, survey_cfg: Dict,
                 vault: Optional[Vault] = None) -> Tuple[str, Dict[str, List[dict]]]:
     """Save the questions, schedule and report settings; keep the saved roster.

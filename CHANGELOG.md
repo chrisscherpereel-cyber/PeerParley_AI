@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.20.0 — start Evaluation 2 from Evaluation 1
+
+Asked: *"If I want to send a second round of peer evaluations built on the
+current student team setup can I just change the evaluation number from 1 to 2
+and everything will work?"* — then *"create a cleaner fix"*.
+
+Changing the number alone opened an empty survey: the uploader asked for the
+spreadsheet again — the original, without any move, addition or removal made
+under 👥 Teams since — and the questions and report settings were back at the
+defaults.
+
+**🔁 Start … from an earlier round** now appears on tab ① for any round that
+is not saved yet, listing the rounds the instructor can see with the latest
+round of the same course first. One press copies:
+
+- the teams **as they stand now**, every 👥 Teams edit included, and the
+  students on no team;
+- the questions, report settings and the instructor's clock.
+
+Not copied: the open/close dates (a new round sets its own), responses, grades
+and AI drafts, and the students' ids — everyone gets a fresh id and a new link,
+so nothing from one round can open or overwrite the other. The new round is
+saved at once and the page says what to do next (dates, *Save these settings*,
+email the links). It refuses to write over a round that already has a saved
+student list, and leaves the source round untouched.
+
+5 new tests (454 total), including a real-app driver that moves a student in
+Eval 1, copies into Eval 2 and checks the teams, settings, dates, ids and
+responses on both sides. The release matrix gains state H (a new round with an
+earlier one to copy from): 356 renders, no failures.
+
+## 2.19.2 — editing a message no longer greys out the page
+
+Reported: *"When a message is edited in the application it seems to take an
+excessively long time to generate - it is grayed for a long time for the
+change to take place."*
+
+**Cause.** The formatting toolbar reports the text 200 ms after every pause
+in typing, and every report reran the whole app — all seven tabs, with their
+storage reads, tables and grading — and Streamlit greys out everything until
+that finishes. With storage on Microsoft 365 or Dropbox, every read past the
+one-minute cache is a network round trip, so the wait grew with the class and
+with how long you had been typing.
+
+**Fix.** The invitation, reminder and results-email composers now each run as
+a *fragment*: typing in the subject or body reruns only that composer — the
+editor, its warnings, the preview and the send options. Everything a composer
+needs from storage is read once by the page and handed in, so an edit does no
+storage I/O at all. Sending, saving and every other change still refresh the
+whole page as before.
+
+Measured in a real browser, 40 students, storage simulated at 0.3 s per call
+after the cache has expired:
+
+| editing… | before | after |
+|---|---|---|
+| the invitation | ~1.5 s per pause, all 178 elements greyed | ~0.45 s, 12 elements |
+| the results email (responses loaded) | 1.7–11 s, all 221 greyed | ~0.4 s, 13 elements |
+
+(The 0.2 s of the "after" figure is the toolbar's own delay before it reports.)
+
+3 new tests (449 total): the composers are fragments, they make no storage
+calls, and the fragment helper falls back cleanly on Streamlit 1.36.
+
 ## 2.19.1 — Start here drops the step that is always done
 
 Asked: *"do we still need ✅ Enter this app's web address in the start here

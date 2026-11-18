@@ -60,6 +60,7 @@ from peerparley import email_delivery as mail
 from peerparley.vault import Vault
 from peerparley.ui_helpers import (
     FULL_WIDTH,
+    as_fragment,
     render_pdf as _render_pdf,
     student_ctx as _ctx,
     build_messages as _build_messages,
@@ -1074,6 +1075,97 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
                            key=f"{key}_recipcsv")
 
 
+# ---- The three email composers -------------------------------------------
+# Each runs as a fragment (see ui_helpers.as_fragment): typing in the subject
+# or the body reruns the composer — editor, warnings, preview and send
+# options — and nothing else. The formatting toolbar reports the text 200 ms
+# after every pause in typing, and each report used to rerun all seven tabs,
+# with every storage read and table on them, greying the page while it did.
+# Everything a composer needs from storage is read by the caller and passed
+# in, so an edit does no storage I/O at all. A send, a save or anything else
+# that changes stored data still reruns the whole app, as it should.
+
+@as_fragment
+def _invite_composer(links, course, eval_no, base_ok, saved_cfg, screen_cfg):
+    subj = st.text_input("Email subject",
+                         "Your peer evaluation for {class} (Eval {eval_no})",
+                         key="inv_subj")
+    body = _email_body(DEFAULT_INVITE_BODY, key="inv_body")
+    email_ui.warn_unfilled(subj, body)
+    email_ui.warn_dates([subj, body], saved_cfg, screen_cfg)
+    subj, body = email_ui.with_dates(saved_cfg, subj, body)
+    email_ui.preview(subj, body, email_ui.sample_ctx(course, eval_no, links))
+    _link_delivery("inv", links, subj, body, course, eval_no, base_ok,
+                   "Invitations")
+
+
+@as_fragment
+def _reminder_composer(nonresp, course, eval_no, slug, url_default,
+                       saved_teams, saved_cfg, screen_cfg):
+    base_url = st.text_input("Public app URL", url_default, key="rem_url")
+    subj = st.text_input("Subject",
+                         "Reminder: your peer evaluation for {class}",
+                         key="rem_subj")
+    body = _email_body(DEFAULT_INVITE_BODY, key="rem_body", height=150)
+    # Built by the same function that builds the invitations, so a reminder
+    # carries the student's permanent id exactly as their first link did. This
+    # used to mint its own token from team and position — the scheme 2.16.0
+    # replaced — so a reminder sent after any roster edit pointed at the wrong
+    # student, or at nobody.
+    _by_name = {l["name"]: l for l in survey.student_links(
+        base_url, slug, saved_teams, survey.token_secret(cfg))}
+    _recips = []
+    for r in nonresp:
+        if not r["email"] or r.get("unassigned"):
+            continue
+        _link = _by_name.get(r["name"], {}).get("link", "")
+        _recips.append({"name": r["name"], "email": r["email"],
+                        "team": r["team"], "link": _link})
+    _missing = [r["name"] for r in _recips if not r["link"]]
+    if _missing:
+        st.warning(
+            "No current link for " + ", ".join(_missing[:5])
+            + ("…" if len(_missing) > 5 else "")
+            + " — they are not on a team at the moment. Give them "
+              "one under **👥 Teams** on tab ① and their link "
+              "starts working.", icon="🔗")
+        _recips = [r for r in _recips if r["link"]]
+    email_ui.warn_unfilled(subj, body)
+    email_ui.warn_dates([subj, body], saved_cfg, screen_cfg)
+    subj, body = email_ui.with_dates(saved_cfg, subj, body)
+    email_ui.preview(subj, body, email_ui.sample_ctx(course, eval_no, _recips))
+    _link_delivery("rem", _recips, subj, body, course, eval_no,
+                   bool(base_url.strip()), "Reminders")
+
+
+@as_fragment
+def _results_composer(course, eval_no, saved_cfg, screen_cfg, report):
+    default_subject = "Your peer evaluation feedback — Eval {eval_no}"
+    default_body = (
+        "Hi {first_name},<br><br>"
+        "Your peer feedback for {class} (Evaluation {eval_no}) is attached. "
+        "It reflects anonymous input from your teammates.<br><br>"
+        "Best,<br>The teaching team"
+    )
+    subject_t = st.text_input("Subject template", default_subject, key="res_subj")
+    body_t = _email_body(default_body, key="results_body", height=200)
+    attach_team = st.checkbox("Attach team-contribution PDF", value=True,
+                              key="res_attach_team")
+
+    # The same preview the invitation and reminder get: one real student's
+    # message, rendered.
+    sample = S["teams"][0].members[0]
+    email_ui.warn_unfilled(subject_t, body_t)
+    email_ui.warn_dates([subject_t, body_t], saved_cfg, screen_cfg)
+    subject_t, body_t = email_ui.with_dates(saved_cfg, subject_t, body_t)
+    email_ui.preview(subject_t, body_t, _ctx(sample, course, eval_no))
+
+    _results_delivery("res", S["teams"], S.get("roster"), subject_t, body_t,
+                      attach_team, course, eval_no, report,
+                      S.get("ai_narratives") or {},
+                      S.get("ai_reports") or {})
+
+
 def _email_body(default_html, key, height=220):
     """The message body, written as it will look. See peerparley/email_ui.py.
 
@@ -1307,6 +1399,62 @@ with tabs[0]:
     # empty, because the file was uploaded the first time.
     _saved_snap = survey.load_roster_snapshot(vault_now(), slug)
     _is_saved = _saved_snap is not None
+
+    if S.get("_round_flash"):
+        st.success(S.pop("_round_flash"), icon="🔁")
+
+    # ---- A new round, started from an earlier one ---------------------------
+    # Changing the evaluation number used to open an empty survey: the
+    # spreadsheet again (without any 👥 Teams edits since), and the default
+    # questions. Offered only for a survey not saved yet, and only from the
+    # surveys this instructor can see — the list the sidebar already read.
+    _rounds = ([] if (_is_saved or not (course or "").strip()) else
+               survey.round_candidates(_mine, course, exclude_slug=slug))
+    if _rounds:
+        with st.container(border=True):
+            st.markdown(f"**🔁 Start {course} · Evaluation {eval_no} from an "
+                        f"earlier round**")
+            st.caption("Copies the teams **as they are now** — including every "
+                       "change made under 👥 Teams — and that survey's questions "
+                       "and report settings. Not copied: the open and close "
+                       "dates, and the responses. Every student gets a new link, "
+                       "so the two rounds never mix. Or skip this and upload a "
+                       "contact list below.")
+            _rlabels = [f"{(r['course'] or '(no course)')} · Eval {r['eval_no']} — "
+                        f"{r['teams']} team(s), {r['students']} student(s)"
+                        for r in _rounds]
+            rc1, rc2 = st.columns([3, 2], vertical_alignment="bottom")
+            _ri = rc1.selectbox("Copy from", range(len(_rounds)),
+                                format_func=lambda i: _rlabels[i], key="round_src")
+            if rc2.button(f"Copy into Eval {eval_no}", type="primary",
+                          key="round_copy", **FULL_WIDTH):
+                _src = _rounds[_ri or 0]
+                try:
+                    _, _sum = survey.start_round_from(
+                        vault_now(), _src["slug"], course, eval_no,
+                        owner=user["user"])
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Nothing was copied: {exc}")
+                else:
+                    # Load the new round's saved settings onto the page, and
+                    # leave the uploader empty: the stored list is the list.
+                    for _k in ("survey_cfg", "_cfg_loaded_for",
+                               "survey_contact_df", "survey_contact_sig",
+                               "survey_contact_warnings", "survey_contact_error"):
+                        S.pop(_k, None)
+                    S["_roster_upload_gen"] = S.get("_roster_upload_gen", 0) + 1
+                    vault_now().refresh()
+                    S["_round_flash"] = (
+                        f"Started **{course} · Evaluation {eval_no}** from "
+                        f"{_src['course']} · Eval {_src['eval_no']}: "
+                        f"{_sum['teams']} team(s), {_sum['students']} student(s)"
+                        + (f", plus {_sum['unassigned']} on no team"
+                           if _sum["unassigned"] else "")
+                        + ". The questions and report settings came across; "
+                          "the dates did not. Next: set the open and close "
+                          "dates under **Schedule**, press **Save these "
+                          "settings**, then email the new links.")
+                    st.rerun()
 
     # ---- Downloadable starter template --------------------------------------
     _tpl_path = os.path.join(_ASSET_DIR, "ContactList_Template.xlsx")
@@ -1875,20 +2023,11 @@ with tabs[0]:
             st.caption(_not_safe_to_resave_note)
         with st.expander(f"Preview {len(links)} links"):
             st.dataframe(pd.DataFrame(links), **FULL_WIDTH, height=280)
-        subj = st.text_input("Email subject",
-                             "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
-        body = _email_body(DEFAULT_INVITE_BODY, key="inv_body")
-        email_ui.warn_unfilled(subj, body)
         # {open_date}/{close_date} come from the SAVED schedule — the one the
-        # links obey — and are filled in once here, so every send path below
-        # gets the same dates.
-        _saved_cfg = survey.load_survey(vault_now(), slug)
-        email_ui.warn_dates([subj, body], _saved_cfg, cur)
-        subj, body = email_ui.with_dates(_saved_cfg, subj, body)
-        email_ui.preview(subj, body,
-                         email_ui.sample_ctx(course, eval_no, links))
-        _link_delivery("inv", links, subj, body, course, eval_no, bool(base_url.strip()),
-                       "Invitations")
+        # links obey. Read here, outside the composer, so typing in it never
+        # waits on storage.
+        _invite_composer(links, course, eval_no, bool(base_url.strip()),
+                         survey.load_survey(vault_now(), slug), dict(cur))
 
 # =========================================================================== #
 # TAB 2 — Responses (monitor + load into grading)
@@ -1943,45 +2082,12 @@ with tabs[1]:
             with st.expander("Send a reminder to non-responders"):
                 # Reuse the URL entered on the ① Set up tab (single source of truth);
                 # fall back to the configured public_url secret.
-                _url_default = (st.session_state.get("inv_url")
-                                or getattr(cfg, "public_url", "")
-                                or _this_app_url() or "")
-                base_url = st.text_input("Public app URL", _url_default, key="rem_url")
-                subj = st.text_input("Subject",
-                                     "Reminder: your peer evaluation for {class}", key="rem_subj")
-                body = _email_body(DEFAULT_INVITE_BODY, key="rem_body", height=150)
-                # Built by the same function that builds the invitations, so a
-                # reminder carries the student's permanent id exactly as their
-                # first link did. This used to mint its own token from team and
-                # position — the scheme 2.16.0 replaced — so a reminder sent
-                # after any roster edit pointed at the wrong student, or at
-                # nobody.
-                _by_name = {l["name"]: l for l in survey.student_links(
-                    base_url, slug, survey.saved_teams(vault_now(), slug),
-                    survey.token_secret(cfg))}
-                _recips = []
-                for r in nonresp:
-                    if not r["email"] or r.get("unassigned"):
-                        continue
-                    _link = _by_name.get(r["name"], {}).get("link", "")
-                    _recips.append({"name": r["name"], "email": r["email"],
-                                    "team": r["team"], "link": _link})
-                _missing = [r["name"] for r in _recips if not r["link"]]
-                if _missing:
-                    st.warning(
-                        "No current link for " + ", ".join(_missing[:5])
-                        + ("…" if len(_missing) > 5 else "")
-                        + " — they are not on a team at the moment. Give them "
-                          "one under **👥 Teams** on tab ① and their link "
-                          "starts working.", icon="🔗")
-                    _recips = [r for r in _recips if r["link"]]
-                email_ui.warn_unfilled(subj, body)
-                email_ui.warn_dates([subj, body], _svy, S.get("survey_cfg"))
-                subj, body = email_ui.with_dates(_svy, subj, body)
-                email_ui.preview(subj, body,
-                                 email_ui.sample_ctx(course, eval_no, _recips))
-                _link_delivery("rem", _recips, subj, body, course, eval_no,
-                               bool(base_url.strip()), "Reminders")
+                _reminder_composer(
+                    nonresp, course, eval_no, slug,
+                    (st.session_state.get("inv_url")
+                     or getattr(cfg, "public_url", "") or _this_app_url() or ""),
+                    survey.saved_teams(vault_now(), slug), _svy,
+                    dict(S.get("survey_cfg") or {}))
 
         st.divider()
         st.markdown("##### Grade the collected responses")
@@ -2379,32 +2485,11 @@ with tabs[4]:
         st.info("No results yet — open **④ Results & reports** first so the grades are "
                 "computed.")
     else:
-        default_subject = "Your peer evaluation feedback — Eval {eval_no}"
-        default_body = (
-            "Hi {first_name},<br><br>"
-            "Your peer feedback for {class} (Evaluation {eval_no}) is attached. "
-            "It reflects anonymous input from your teammates.<br><br>"
-            "Best,<br>The teaching team"
-        )
-        subject_t = st.text_input("Subject template", default_subject)
-        body_t = _email_body(default_body, key="results_body", height=200)
-        attach_team = st.checkbox("Attach team-contribution PDF", value=True)
-
-        # The same preview the invitation and reminder get: one real student's
-        # message, rendered. This used to be the only rendered preview in the
-        # app, and the two messages a whole section actually receives had none.
-        sample = S["teams"][0].members[0]
-        email_ui.warn_unfilled(subject_t, body_t)
-        _saved_cfg = survey.load_survey(vault_now(), survey.slugify(course, eval_no))
-        email_ui.warn_dates([subject_t, body_t], _saved_cfg, S.get("survey_cfg"))
-        subject_t, body_t = email_ui.with_dates(_saved_cfg, subject_t, body_t)
-        email_ui.preview(subject_t, body_t, _ctx(sample, course, eval_no))
-
-        report = _report_settings(course, eval_no)
-        _results_delivery("res", S["teams"], S.get("roster"), subject_t, body_t,
-                          attach_team, course, eval_no, report,
-                          S.get("ai_narratives") or {},
-                          S.get("ai_reports") or {})
+        _results_composer(course, eval_no,
+                          survey.load_survey(vault_now(),
+                                             survey.slugify(course, eval_no)),
+                          dict(S.get("survey_cfg") or {}),
+                          _report_settings(course, eval_no))
 
 # =========================================================================== #
 # TAB 6 — Compare rounds (eval 1 vs 2 vs 3 for the same students)

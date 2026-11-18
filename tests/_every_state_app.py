@@ -222,6 +222,9 @@ def main(workdir: str, quick: bool = False) -> int:
         # presses every Move, Remove, Rename and Dissolve too.
         "G Teams editor open": dict(course="ST101", **loaded_state(),
                                     roster_open=True),
+        # A round not saved yet, with an earlier one to start from: the
+        # sweep presses "Copy into Eval 2" and every control after it.
+        "H new round": dict(course="ST101", new_eval="2"),
     }
     if quick:
         # The richest single state: everything is loaded, so every tab is live

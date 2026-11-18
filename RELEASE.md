@@ -1,6 +1,6 @@
 # Release checklist
 
-What was validated before 2.19.1, and what to re-run before any future
+What was validated before 2.20.0, and what to re-run before any future
 release. Everything here is a command, so the answer is never a matter of
 opinion.
 
@@ -8,7 +8,7 @@ opinion.
 
 ```bash
 python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest tests/ -q          # expect: 446 passed
+python3 -m pytest tests/ -q          # expect: 454 passed
 python3 qa_regression.py             # expect: 95/95 checks passed
 python3 selfcheck.py                 # expect: exit 0 on a configured install
 ```
@@ -19,11 +19,13 @@ python3 selfcheck.py                 # expect: exit 0 on a configured install
 python3 tests/_every_state_app.py /tmp/ppstate   # ~4 min; expect FAILURES: none
 ```
 
-The full crash matrix: seven states an instructor can reach, and in each one
+The full crash matrix: eight states an instructor can reach, and in each one
 every button pressed, every checkbox and toggle switched on, and every option
 of every dropdown chosen — each from a freshly restored copy of the same data,
 so one press cannot leak into the next. The suite runs the two richest states
-of it on every commit; this runs all seven. At 2.17.0: 320 renders, 67 buttons,
+of it on every commit; this runs all eight (state H, a new round
+not yet saved, was added in 2.20.0: 356 renders, 73 buttons, 55 checkboxes,
+191 choices, no failures). At 2.17.0: 320 renders, 67 buttons,
 51 checkboxes and toggles, 168 dropdown choices, no failures, on both the dev
 environment and a clean install of `requirements.txt` (which pulled Streamlit
 1.67 and pandas 3.1, newer than the dev environment).

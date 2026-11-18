@@ -226,6 +226,27 @@ A moved or newly added student whom nobody has evaluated appears in the results
 as **No data**, with their grade left at the team score — not as a low score,
 and not missing from the report.
 
+## A second round (Evaluation 2, 3, …)
+
+Each round is its own survey, filed under the course and the evaluation number,
+so its links, responses and grades never mix with another round's. To start
+one, choose **➕ New survey…** in the sidebar and type the same course with the
+next evaluation number. Tab ① then offers **🔁 Start … from an earlier round**,
+with the latest round of the same course chosen for you; press **Copy into
+Eval 2**.
+
+| Copied | Not copied |
+|---|---|
+| The teams **as they are now** — every move, addition and removal made under 👥 Teams | The open and close dates — set the new round's own under *Schedule* |
+| Students who are on no team | The responses, grades and AI drafts |
+| The questions, the report settings, the instructor's clock | The students' ids: everyone gets a **new link** |
+
+The new round is saved straight away; set its dates, press **Save these
+settings**, and email the links. The copy never writes over a round that
+already has a saved student list, and the round it came from is not changed.
+Uploading a contact list instead still works as before. The 📈 Compare tab
+lines the rounds up student by student.
+
 ## Writing the emails
 
 Every message the app sends — the invitation, the reminder and the results

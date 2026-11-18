@@ -31,6 +31,20 @@ def _detect_width_kwargs() -> dict:
 FULL_WIDTH = _detect_width_kwargs()
 
 
+def as_fragment(fn):
+    """`st.fragment` where this Streamlit has it, otherwise the plain function.
+
+    A widget inside a fragment reruns only the fragment, not the whole page.
+    That matters most for the email composers: the formatting toolbar reports
+    the text 200 ms after every pause in typing, and each report used to rerun
+    all seven tabs — every vault read, every table, every preview — and grey
+    the page out while it did. requirements.txt allows Streamlit from 1.36;
+    `st.fragment` arrived in 1.37, hence the fallback.
+    """
+    frag = getattr(st, "fragment", None)
+    return frag(fn) if callable(frag) else fn
+
+
 def render_pdf(pdf_bytes: bytes, key: str = "pdf", label: str = "") -> None:
     """Show a PDF on screen, page by page.
 

@@ -148,7 +148,10 @@ def test_the_reminder_path_does_not_mint_its_own_positional_tokens(vault):
     """It used to build `{s, t, p}` itself — the scheme 2.16.0 replaced — so a
     reminder sent after any roster edit pointed at the wrong student."""
     source = open(os.path.join(REPO, "app.py"), encoding="utf-8").read()
-    reminder = source.split("Send a reminder to non-responders", 1)[1][:3000]
+    # The reminder is written in its own composer (a fragment since 2.19.2).
+    assert "_reminder_composer(" in source.split(
+        "Send a reminder to non-responders", 1)[1][:800]
+    reminder = source.split("def _reminder_composer(", 1)[1][:3000]
     assert "make_token(" not in reminder, \
         "reminders must reuse survey.student_links, which carries the id"
     assert "student_links(" in reminder
@@ -272,3 +275,58 @@ def test_every_send_path_gets_the_dates():
     assert parts[0]["subject"] == "Due Friday, November 20, 2026 at 5:00 PM"
     assert parts[0]["body"] == ("Hi Ann — by Friday, November 20, 2026 at "
                                 "5:00 PM: https://pp.example/?t=x")
+
+
+# --------------------------------------------------------------------------- #
+# Editing a message reruns the composer, not the page (2.19.2)
+# --------------------------------------------------------------------------- #
+# Reported: editing a message greyed the page out for a long time. The
+# toolbar reports the text 200 ms after every pause in typing, and each report
+# reran all seven tabs. Measured in a real browser with a 40-student section
+# and storage that takes 0.3 s a call: every edit greyed all ~220 elements and
+# took 1.7–11 s to show; as fragments, 13 elements and ~0.4 s.
+
+def _app_functions():
+    import ast
+    tree = ast.parse(open(os.path.join(REPO, "app.py"), encoding="utf-8").read())
+    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+
+def test_the_three_composers_are_fragments():
+    import ast
+    fns = _app_functions()
+    for name in ("_invite_composer", "_reminder_composer", "_results_composer"):
+        assert name in fns, name
+        decos = [d.id for d in fns[name].decorator_list if isinstance(d, ast.Name)]
+        assert "as_fragment" in decos, f"{name} is not a fragment"
+
+
+def test_an_edit_does_no_storage_io():
+    """Everything a composer needs from storage is read by its caller and
+    passed in; only an actual send touches the vault."""
+    import ast
+    fns = _app_functions()
+    for name in ("_invite_composer", "_reminder_composer", "_results_composer"):
+        src = ast.unparse(fns[name])
+        for call in ("vault_now(", "load_survey(", "saved_teams(",
+                     "load_roster_snapshot(", "response_count(", "list_surveys(",
+                     "_report_settings("):
+            assert call not in src, f"{name} calls {call} on every keystroke"
+
+
+def test_as_fragment_uses_st_fragment_and_falls_back():
+    import streamlit as st
+    from peerparley import ui_helpers
+
+    def f():
+        return 1
+    if callable(getattr(st, "fragment", None)):
+        assert ui_helpers.as_fragment(f) is not f
+    saved = getattr(st, "fragment", None)
+    try:
+        if saved is not None:
+            delattr(st, "fragment")
+        assert ui_helpers.as_fragment(f) is f
+    finally:
+        if saved is not None:
+            st.fragment = saved
