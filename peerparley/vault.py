@@ -340,6 +340,20 @@ def _make_backend(cfg: VaultConfig) -> StorageBackend:
 # instrument for wanting an answer now.
 CACHE_TTL = 60.0
 
+# How many objects `Vault.prefetch` asks storage for at once. Six stays inside
+# every provider's default connection pool (the Dropbox SDK's is eight) and
+# well under their rate limits, while turning forty sequential round trips
+# into about seven.
+PREFETCH_WORKERS = 6
+
+# How old a survey's roster may be when it is only being *listed* — the
+# sidebar's survey menu and the "start from an earlier round" choices, which
+# show course, round and head counts. Re-reading every survey's roster each
+# minute cost one round trip per survey on every page once the cache had
+# expired, and grows with every semester kept. The survey actually open is
+# always read at the normal freshness, and a save here updates the copy.
+SUMMARY_MAX_AGE = 600.0
+
 _reads: Dict[Tuple[str, str, str], Tuple[float, Any]] = {}
 _listings: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
 
@@ -428,11 +442,28 @@ class Vault:
         return (f"{self.cfg.backend}:{getattr(self._backend, 'root', '')}",
                 str(self.cfg.folder))
 
-    def refresh(self) -> None:
-        """Drop this vault's remembered reads, so the next one goes to storage."""
-        for key in [k for k in _reads if k[:2] == self._scope]:
+    def refresh(self, prefixes=None) -> None:
+        """Drop this vault's remembered reads, so the next one goes to storage.
+
+        With ``prefixes``, only the objects whose names start with one of them
+        are dropped (and the listing, so new objects are found). "Check for
+        new responses" wants one survey's submissions re-read, not every
+        survey, account and setting in the vault — which cost two full pages of
+        round trips per press.
+        """
+        pre = tuple(prefixes) if prefixes else None
+        for key in [k for k in _reads if k[:2] == self._scope
+                    and (pre is None or str(k[2]).startswith(pre))]:
             _reads.pop(key, None)
         _listings.pop(self._scope, None)
+
+    def seen(self, name: str) -> bool:
+        """Has this object been read or written here before (at any age)?
+
+        No I/O. Lets a warm-up fetch only what a page is known to need — a
+        survey's settings exist only once its roster does."""
+        hit = _reads.get((*self._scope, name))
+        return hit is not None and hit[1] is not _MISSING
 
     def _remember(self, name: str, data: Any) -> None:
         _reads[(*self._scope, name)] = (_now(), data)
@@ -481,10 +512,18 @@ class Vault:
         self._listing_with(name)
         return out
 
-    def get_bytes(self, name: str) -> bytes:
+    def get_bytes(self, name: str, max_age: Optional[float] = None) -> bytes:
+        """Read and decrypt one object, through the short-lived cache.
+
+        ``max_age`` lets a caller accept an older remembered copy than the
+        default minute — for summaries where a slightly old value is harmless
+        and a fresh one costs a round trip per object (the sidebar's survey
+        list). A write from this app always replaces the remembered copy, so
+        it never hides a change made here.
+        """
         key = (*self._scope, name)
         hit = _reads.get(key)
-        if hit is not None and _now() - hit[0] < CACHE_TTL:
+        if hit is not None and _now() - hit[0] < (max_age or CACHE_TTL):
             if hit[1] is _MISSING:
                 raise KeyError(f"{name} is not in this vault")
             return hit[1]
@@ -500,6 +539,52 @@ class Vault:
             raise
         self._remember(name, data)
         return data
+
+    def prefetch(self, names, workers: int = PREFETCH_WORKERS,
+                 max_age: Optional[float] = None) -> None:
+        """Fetch many objects at once, so the reads that follow hit the cache.
+
+        Storage on Microsoft 365, Dropbox or pCloud answers one object per
+        HTTPS round trip, and the app used to make those trips one after
+        another: opening a survey read every student's submission in turn, so
+        a 40-student section cost 40 round trips — ten seconds or more — before
+        the page could draw. Fetched side by side, the same reads take about
+        as long as the slowest few.
+
+        The first uncached object is fetched alone, so a provider that has to
+        sign in or refresh a token does that once, not on six threads at
+        once. Failures are not raised here: `get_bytes` remembers them, and the
+        caller's own read reports them exactly as before.
+        """
+        todo, seen = [], set()
+        for n in names:
+            if n in seen:
+                continue
+            seen.add(n)
+            hit = _reads.get((*self._scope, n))
+            if hit is None or _now() - hit[0] >= (max_age or CACHE_TTL):
+                todo.append(n)
+        if not todo or self._backend is None:
+            return
+
+        def _one(name):
+            try:
+                self.get_bytes(name)
+            except Exception:  # noqa: BLE001 - reported by the caller's read
+                pass
+
+        _one(todo[0])
+        rest = todo[1:]
+        if not rest:
+            return
+        if workers <= 1 or len(rest) == 1:
+            for n in rest:
+                _one(n)
+            return
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(workers, len(rest)),
+                                thread_name_prefix="pp-vault") as pool:
+            list(pool.map(_one, rest))
 
     def list(self) -> List[str]:
         hit = _listings.get(self._scope)

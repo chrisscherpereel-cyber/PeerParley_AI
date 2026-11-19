@@ -1,5 +1,78 @@
 # Changelog
 
+## 2.20.2 — the other slow paths
+
+Asked: *"Are there other similar issues that are slow in the application that
+can be fixed."* Every common action was timed with 6 surveys of 40 students
+and storage simulated at 0.3 s per read (a cloud provider), counting each
+storage call and who made it. Four more were worth fixing:
+
+- **Every click after a minute re-read every survey's roster** — for the
+  sidebar's survey menu, which shows only course, round and head counts. That
+  was one round trip per survey on every page once the cache had expired, and
+  it grows with each semester kept. Those summaries may now be up to ten
+  minutes old; the open survey is still read fresh, and any change made in the
+  app updates the summary at once.
+- **"Check for new responses" re-read the whole vault twice** — every
+  survey's roster, the accounts and the settings — to find one survey's new
+  submissions. It now drops only that survey's cached objects.
+- **The report previews redrew every PDF page on every click.** With the
+  instructor and student previews switched on, rasterising cost about 1.5 s on
+  each interaction anywhere on the page, before any storage was involved. Each
+  report's pages are now drawn once and reused until the report changes. (Also
+  imports PyMuPDF under its current name, `pymupdf`, falling back to `fitz`.)
+- **Reads every page needs went one after another.** The account list, the
+  open survey's roster and settings — and, on the first page, the saved
+  session and AI settings — are now fetched together. The student form does
+  the same for its roster, questions and the student's earlier answers, so a
+  student on a phone waits for one round trip instead of three.
+
+| action (0.3 s per read) | 2.20.0 | 2.20.1 | 2.20.2 |
+|---|---|---|---|
+| any click once the cache has expired | 2.9 s | 1.6 s | **1.0 s** |
+| open a survey | 14.9 s | 1.6 s | **1.6 s** |
+| Load responses into grading | 16.0 s | 5.0 s | **4.4 s** |
+| Check for new responses | 17.7 s | 3.2 s | **2.0 s** |
+| sign in | 3.8 s | 2.6 s | **2.2 s** |
+
+Unchanged because they are already as fast as the storage allows: saving
+settings and saving a bundle (one write each), and any click while the cache
+is warm (0.1–0.2 s).
+
+6 new tests (466 total): summaries survive cache expiry but not a change
+made here, the scoped refresh leaves other surveys cached, PDF pages are
+drawn once, and the student form fetches its reads together.
+
+## 2.20.1 — switching surveys in under two seconds, not fifteen
+
+Asked: *"why does it take so long to go from one survey to another?"*
+
+**Cause.** Opening a survey fetched and decrypted **every student's
+submission**, one after another, only to fill in the *responded / not yet*
+column on tab ② — and the sidebar's survey list re-read every survey's roster,
+also one after another. On Microsoft 365, Dropbox or pCloud each read is a
+separate HTTPS round trip, and the one-minute read cache is always cold for a
+survey you have not just looked at. A 40-student section was 48 round trips
+before the page could draw.
+
+- **Who has answered now comes from the file names.** A submission is filed
+  under its author's id, so one listing (already made) says who has answered;
+  no submission is opened. Surveys from before 2.16.0, whose files carry no id,
+  are still read as before.
+- **Reads that are needed happen side by side.** The sidebar's rosters, and
+  the submissions read when loading responses into grading, building the
+  comparison or checking a team edit, are fetched six at a time instead of one
+  by one (`Vault.prefetch`). The first read goes alone, so a provider that has
+  to sign in does it once.
+
+Measured with 6 surveys of 40 students and storage simulated at 0.3 s per
+read: **14.9 s → 1.7 s** per switch (48 reads → 8, five of them in parallel);
+signing in 3.9 s → 2.7 s.
+
+6 new tests (460 total): status without opening a submission, the pre-2.16.0
+fallback, parallel prefetch filling the cache, sign-in-first ordering, a
+failed read still reported by its caller, and the sidebar list in parallel.
+
 ## 2.20.0 — start Evaluation 2 from Evaluation 1
 
 Asked: *"If I want to send a second round of peer evaluations built on the

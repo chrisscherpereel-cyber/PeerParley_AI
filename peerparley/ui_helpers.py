@@ -45,6 +45,24 @@ def as_fragment(fn):
     return frag(fn) if callable(frag) else fn
 
 
+@st.cache_data(show_spinner=False, max_entries=24)
+def _pdf_pages_png(pdf_bytes: bytes, dpi: int = 120) -> list:
+    """Each page of a PDF as PNG bytes — drawn once per distinct PDF.
+
+    Rasterising is the slowest thing on the results tab: about half a second
+    per report on a laptop, more on a shared server, and with the previews
+    switched on it used to happen on *every* click anywhere on the page. The
+    PDF's bytes are the key, so a report that changes is redrawn and one that
+    has not is not.
+    """
+    try:
+        import pymupdf as fitz          # the name PyMuPDF uses from 1.24
+    except ImportError:                 # older releases have only `fitz`
+        import fitz
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        return [page.get_pixmap(dpi=dpi).tobytes("png") for page in doc]
+
+
 def render_pdf(pdf_bytes: bytes, key: str = "pdf", label: str = "") -> None:
     """Show a PDF on screen, page by page.
 
@@ -63,7 +81,10 @@ def render_pdf(pdf_bytes: bytes, key: str = "pdf", label: str = "") -> None:
     be listed in requirements-optional.txt.
     """
     try:
-        import fitz  # PyMuPDF
+        try:
+            __import__("pymupdf")       # PyMuPDF: is it installed?
+        except ImportError:
+            __import__("fitz")
     except Exception:  # noqa: BLE001
         st.info("Showing a PDF inside the app needs the **PyMuPDF** package "
                 "(`pip install PyMuPDF`, or add `PyMuPDF` to requirements.txt "
@@ -73,10 +94,8 @@ def render_pdf(pdf_bytes: bytes, key: str = "pdf", label: str = "") -> None:
                            f"{key}.pdf", "application/pdf", key=f"dl_{key}")
         return
     try:
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            for page in doc:
-                pix = page.get_pixmap(dpi=120)
-                st.image(pix.tobytes("png"), **FULL_WIDTH)
+        for png in _pdf_pages_png(bytes(pdf_bytes)):
+            st.image(png, **FULL_WIDTH)
     except Exception as exc:  # noqa: BLE001
         st.warning(f"That report could not be drawn on screen ({exc}). "
                    "Downloading it works regardless.", icon="⚠️")

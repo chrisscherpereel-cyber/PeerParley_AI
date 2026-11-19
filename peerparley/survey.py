@@ -1334,10 +1334,15 @@ def list_surveys(vault: Optional[Vault] = None):
                  if str(n).startswith("roster__") and str(n).endswith(".ppj")]
     except Exception:
         names = []
+    # All at once, and allowed to be a few minutes old: this runs on every
+    # page and reads one roster per survey only to list it.
+    from .vault import SUMMARY_MAX_AGE
+    vault.prefetch(names, max_age=SUMMARY_MAX_AGE)
     out = []
     for n in names:
         try:
-            snap = _load_json(vault, n)
+            snap = json.loads(vault.get_bytes(n, max_age=SUMMARY_MAX_AGE)
+                              .decode("utf-8"))
         except Exception:
             continue
         teams = snap.get("teams", {})
@@ -1508,6 +1513,9 @@ def all_responses(vault: Vault, slug: str) -> List[dict]:
         names = [n for n in vault.list() if str(n).startswith(prefix)]
     except Exception:
         names = []
+    # Forty submissions are forty round trips to a cloud provider; fetched
+    # side by side rather than one after another.
+    vault.prefetch(names)
     out = []
     for n in names:
         try:
@@ -1526,11 +1534,30 @@ def response_status(vault: Vault, slug: str) -> List[dict]:
     snap = roster_now(vault, slug)
     if not snap:
         return []
-    responses = all_responses(vault, slug)
-    by_id = {str(r.get("member_id", "")) for r in responses
-             if r.get("member_id")}
-    by_seat = {(r.get("team"), int(r.get("pos", -1))) for r in responses
-               if not r.get("member_id")}
+    # Who has answered is in the object names: a submission is filed under its
+    # author's id. Opening a survey used to fetch and decrypt every submission
+    # just to learn that — on cloud storage, one round trip per student before
+    # the page could draw. The contents are read only for a survey that still
+    # has nothing but pre-2.16.0 positional names, which carry no id.
+    prefix = _resp_prefix(slug)
+    try:
+        names = {str(n) for n in vault.list() if str(n).startswith(prefix)}
+    except Exception:  # noqa: BLE001
+        names = set()
+    by_id: set = set()
+    by_seat: set = set()
+    if any(n.startswith(f"{prefix}m") for n in names):
+        for team, members in (snap.get("teams", {}) or {}).items():
+            for m in members:
+                mid = str(m.get("id", ""))
+                if mid and key_response(slug, mid) in names:
+                    by_id.add(mid)
+    elif names:
+        responses = all_responses(vault, slug)
+        by_id = {str(r.get("member_id", "")) for r in responses
+                 if r.get("member_id")}
+        by_seat = {(r.get("team"), int(r.get("pos", -1))) for r in responses
+                   if not r.get("member_id")}
     rows = []
     for team, members in (snap.get("teams", {}) or {}).items():
         for pos, m in enumerate(members):
@@ -1843,6 +1870,16 @@ def render_student_app(token: str) -> None:
         st.error("This evaluation isn't available right now. Please try again "
                  "later, or contact your instructor if it continues.")
         return
+    # The three things this form reads — the roster, the questions, and this
+    # student's earlier answers — fetched together rather than one round trip
+    # after another, on what is often a phone on a slow connection.
+    try:
+        _first = [key_roster(slug), key_survey(slug)]
+        if payload.get("i"):
+            _first.append(key_response(slug, str(payload["i"])))
+        vault.prefetch(_first)
+    except Exception:  # noqa: BLE001 - a warm-up must never cost the form
+        pass
     try:
         snap = roster_now(vault, slug)
         survey = load_survey(vault, slug)

@@ -46,6 +46,7 @@ from peerparley import ai_ui
 from peerparley import setup_wizard
 from peerparley import webcontext
 from peerparley import workspace
+from peerparley import aiconfig
 from peerparley.grading import (
     GradeSettings,
     compute,
@@ -434,6 +435,29 @@ def graded(long_df: pd.DataFrame, settings: GradeSettings, self_evals=None):
 user = st.session_state.get("pp_user") or {"user": "admin", "name": "Administrator",
                                            "role": "admin", "source": "secrets"}
 is_admin = accounts.is_admin(user)
+
+# The handful of objects every page reads — the account list, this
+# instructor's saved session and AI settings, and the open survey — fetched
+# side by side, rather than one round trip after another as the page reaches
+# each of them. Costs nothing when they are already remembered.
+try:
+    _u0 = str(user.get("user") or "default")
+    _first = [accounts.ACCOUNTS_KEY]
+    if not S.get("_pp_warmed"):
+        # Read once per session (resuming a saved session, the AI settings),
+        # so only worth fetching ahead on the first page.
+        _first += [workspace.workspace_key(_u0), aiconfig.settings_key(_u0)]
+        S["_pp_warmed"] = True
+    _v0 = vault_now()
+    if S.get("_active_slug"):
+        _first.append(survey.key_roster(S["_active_slug"]))
+        # Its settings are read only once it is saved: fetching them for a
+        # survey that does not exist yet would be a round trip for nothing.
+        if _v0.seen(survey.key_roster(S["_active_slug"])):
+            _first.append(survey.key_survey(S["_active_slug"]))
+    _v0.prefetch(_first)
+except Exception:  # noqa: BLE001 - a warm-up must never cost the page
+    pass
 
 with st.sidebar:
     st.markdown(f"**{user.get('name', 'User')}**")
@@ -2047,7 +2071,9 @@ with tabs[1]:
             # Both layers: the progress table's own cache, and the vault's
             # short-lived read cache that makes every other click fast.
             _response_status.clear()
-            vault_now().refresh()
+            vault_now().refresh(prefixes=(f"resp__{slug}__",
+                                          survey.key_roster(slug),
+                                          survey.key_survey(slug)))
             st.rerun()
     if _blocked:
         st.error(f"This section belongs to another instructor (`{_owner or 'unowned'}`). "
