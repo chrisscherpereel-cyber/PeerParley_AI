@@ -175,7 +175,12 @@ def test_a_numbers_only_survey_is_not_dampened_at_all():
                           "Dee": {"Ann": 60, "Bob": 20, "Cid": 20}})
     members = {m.name: m for t in compute(df, GradeSettings()) for m in t.members}
     assert all(m.Q == 1.0 for m in members.values())
-    assert members["Ann"].signed_pct > 0        # the dollars still reach the grade
+    # The dollars still reach the grade: with the default no-bonus cap, as a
+    # deduction for those below the team average.
+    assert members["Cid"].signed_pct < 0
+    bonus = {m.name: m for t in compute(df, GradeSettings(max_multiplier=1.05))
+             for m in t.members}
+    assert bonus["Ann"].signed_pct > 0
 
 
 def test_a_student_nobody_wrote_about_takes_the_team_average():
@@ -230,7 +235,8 @@ def test_a_flat_section_explains_itself_with_the_instructors_own_numbers():
                           "Bob": {"Ann": 35, "Cid": 33, "Dee": 32},
                           "Cid": {"Ann": 35, "Bob": 33, "Dee": 32},
                           "Dee": {"Ann": 34, "Bob": 33, "Cid": 33}})
-    settings = GradeSettings(rounding_step=5)
+    settings = GradeSettings(rounding_step=5, rounding_mode="nearest",
+                             sensitivity_B=0.5, max_multiplier=1.05)
     teams = compute(df, settings)
     assert all(m.signed_pct == 0 for t in teams for m in t.members)
     note = adjustment_note(teams, settings)

@@ -57,8 +57,17 @@ grade_Δ (signed_pct) = individual − team_score         # rounded to your step
 - **Direction is guaranteed:** `pay_grade > 1` → **bonus (+)**, `< 1` → **deduction
   (−)**, `= 1` → **0**. `A` and `Q` are both ≤ 1, so they can only *shrink* the
   adjustment — never flip its sign.
-- **B (sensitivity, default 0.5)** — how strongly peer input moves the grade.
-- **cap (default ±15%)** — the most any grade can move (set as *Maximum adjustment*).
+- **B (sensitivity, default 1.0)** — how strongly peer input moves the grade.
+- **caps** — the bonus and the deduction are capped separately: *Maximum
+  increase* defaults to **0%** (nobody rises above the team score) and *Maximum
+  decrease* to **50%**.
+- **rounding (default 5% steps, rounded down)** — the rounded figure is the
+  grade. Rounding *down* means any shortfall at all costs at least one step:
+  −0.4% becomes −5%, −6% becomes −10%; a student at or above the team average
+  keeps the team score. Choose 1% steps or *nearest* for a gentler scale.
+
+These defaults are from 2.21.0. Before it they were B 0.5, a 5% bonus cap and
+1% steps to the nearest.
 
 *Example:* team average $40; a student averaging $70 received → pay grade 175% → a
 bonus; one averaging $20 → 50% → a deduction; one at $40 → 100% → no change.
@@ -102,9 +111,39 @@ teammates. **With no comments, Q is neutral (1.0)** so the adjustment isn't
 dampened for a reason outside the student's control.
 
 ## 5. Feedback points (response quality)
-The same comment scorer is applied to the feedback a student **wrote** about their
-teammates; `points = round(Q_author × max_points)` (default max **5**). This rewards
-writing serious, specific feedback — separate from the grade adjustment.
+Points for the feedback a student **wrote** about their teammates (default
+max **10**), separate from the grade adjustment. Two methods, chosen on the
+*Grading rules* tab:
+
+- **Quality** *(default)* — the same comment scorer, applied to what the
+  student wrote: `points = round(Q_author × max_points)`, averaged over every
+  teammate they were asked about.
+- **Rough** — four tiers, scaled to the maximum (exactly these at 10):
+
+  | points | when |
+  |---|---|
+  | **0** | no submission |
+  | **5** | submitted, but under 5 words per teammate **and** about the same numbers for everyone (the $100 within 15% of an even share, average ratings within half a point, the same ranking) |
+  | **7** | some feedback — more writing than that, or numbers that clearly told teammates apart — but not constructive |
+  | **10** | constructive: a specific, substantive comment (comment score ≥ 0.6) for at least half of their teammates |
+
+  Each student's tier and the reason for it are shown on their report panel.
+
+## 5b. Instructor overrides
+On *Results & reports → One student's report*, the grade adjustment and the
+feedback points can each be set by hand for any student. An adjustment override
+is a percent of the team score (−10 → 90% of the team score) and is **not** held
+to the caps; the page warns when it goes past them. The student's report and
+every email carry the final figure; the results table's *Overridden* column, the
+asterisk on the summary PDF, and the panel itself show what was replaced.
+Leaving a box empty, or *Clear*, returns to the computed figure.
+
+## Each evaluation keeps its own rules
+Grading rules and overrides are stored with the evaluation they belong to
+(`grading__<slug>.ppj`, encrypted like everything else). Changing them while
+grading Eval 1 does not touch Eval 2; *Compare* grades each round by its own
+rules; starting a new round from an earlier one copies the rules (never the
+overrides); deleting an evaluation deletes its rules with it.
 
 ## 6. Dimension letter grades
 Each of the four rating statements (Team Player, Quantity, Quality, Effect) is
@@ -155,8 +194,9 @@ anything", which is Yes for every student in the table, then "did they rate
 themselves", which varied but said nothing about what they said.
 
 ---
-The instructor controls the two settings most people touch — **sensitivity B** and
-the **maximum adjustment ±%** — on the *Grading rules* tab, with everything else
+The instructor controls the settings most people touch — **sensitivity B**, the
+**maximum increase / decrease**, and how feedback points are scored — on the
+*Grading rules* tab, separately for each evaluation, with everything else
 under *Advanced options*. What each student *sees* on their PDF is controlled
 separately under *Set up survey → What students see in their feedback report*.
 

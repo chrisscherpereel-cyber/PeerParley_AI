@@ -284,6 +284,43 @@ def key_roster(slug: str) -> str:
     return f"roster__{slug}.ppj"
 
 
+def key_grading(slug: str) -> str:
+    """This evaluation's grading rules and the instructor's per-student overrides."""
+    return f"grading__{slug}.ppj"
+
+
+def load_grading(vault: Vault, slug: str) -> Dict[str, Any]:
+    """``{"settings": {...}, "overrides": {...}}`` for one evaluation.
+
+    Empty dicts when nothing has been saved — the evaluation then grades with
+    the defaults. Grading rules used to live in the browser session, so
+    changing them for one evaluation changed them for every evaluation opened
+    afterwards; each evaluation now keeps its own.
+    """
+    try:
+        got = _load_json(vault, key_grading(slug))
+    except Exception:  # noqa: BLE001 - nothing saved yet, or unreadable
+        return {"settings": {}, "overrides": {}}
+    if not isinstance(got, dict):
+        return {"settings": {}, "overrides": {}}
+    return {"settings": dict(got.get("settings") or {}),
+            "overrides": {str(k): dict(v) for k, v in
+                          (got.get("overrides") or {}).items()
+                          if isinstance(v, dict)}}
+
+
+def save_grading(vault: Vault, slug: str, settings: Dict,
+                 overrides: Optional[Dict] = None) -> None:
+    """Store one evaluation's grading rules and overrides (encrypted)."""
+    clean = {}
+    for k, v in (overrides or {}).items():
+        v = {f: v.get(f) for f in ("adjust", "points") if v.get(f) is not None}
+        if v:
+            clean[str(k)] = v
+    _save_json(vault, key_grading(slug),
+               {"settings": dict(settings or {}), "overrides": clean})
+
+
 def key_response(slug: str, member_id: str) -> str:
     """Where one student's submission lives, by their permanent id."""
     return f"resp__{slug}__m{_safe(member_id)}.ppj"
@@ -662,8 +699,9 @@ def start_round_from(vault: Vault, source_slug: str, course: str,
     questions and report settings went back to the defaults.
 
     Copied: the teams **as they stand now** (edits included), the students on
-    no team, and the survey settings. Not copied: the open/close dates (a new
-    round has its own), the responses, and the students' ids — every student
+    no team, the survey settings and the grading rules. Not copied: the
+    open/close dates (a new round has its own), the responses, any
+    per-student grade overrides, and the students' ids — every student
     gets a fresh id, so the new links are new and nothing from one round can
     open or overwrite the other. Refuses to write over a round that already
     has a saved student list.
@@ -696,6 +734,12 @@ def start_round_from(vault: Vault, source_slug: str, course: str,
     # The roster is written last: it is what makes a survey count as saved,
     # so a failure part way leaves no half-made round behind it.
     _save_json(vault, key_survey(slug), cfg)
+    # The grading rules come along as the new round's starting point — they
+    # are the instructor's way of running the course — but never the
+    # per-student overrides, which were decisions about that round's results.
+    _src_rules = load_grading(vault, source_slug).get("settings") or {}
+    if _src_rules:
+        save_grading(vault, slug, _src_rules, {})
     _save_json(vault, key_roster(slug),
                {"course": course, "eval_no": eval_no, "teams": teams,
                 "unassigned": loose, "owner": owner or "",
@@ -1267,7 +1311,8 @@ def survey_objects(vault: Vault, slug: str) -> List[str]:
     except Exception:  # noqa: BLE001
         names = set()
     wanted = []
-    for fixed in (key_survey(slug), key_roster(slug), drafts_key(slug)):
+    for fixed in (key_survey(slug), key_roster(slug), drafts_key(slug),
+                  key_grading(slug)):
         if fixed in names:
             wanted.append(fixed)
     wanted += sorted(n for n in names if str(n).startswith(_resp_prefix(slug)))

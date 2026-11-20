@@ -185,9 +185,16 @@ def test_a_unanimous_section_does_not_turn_a_dollar_into_a_penalty():
 # --------------------------------------------------------------------------- #
 # The grade columns actually differentiate students
 # --------------------------------------------------------------------------- #
+# Fine-grained rules: what the instructor gets on 1% steps to the nearest,
+# with a bonus allowed. The shipped defaults (2.21.0) round down in 5% steps
+# with no bonus, which deliberately puts a section on a few grades.
+FINE = GradeSettings(sensitivity_B=0.5, max_multiplier=1.05, rounding_step=1,
+                     rounding_mode="nearest")
+
+
 def test_the_grade_columns_are_not_the_same_for_everyone():
-    """The report as the instructor sees it, with the shipped defaults."""
-    frame = results_to_frame(compute(section(), GradeSettings()))
+    """The report as the instructor sees it on fine-grained rules."""
+    frame = results_to_frame(compute(section(), FINE))
     for column in ("Individual Score", "Grade Δ", "A (agreement)",
                    "Peer Factor"):
         assert frame[column].astype(str).nunique() >= 8, (
@@ -195,13 +202,19 @@ def test_the_grade_columns_are_not_the_same_for_everyone():
             f"values across {len(frame)} students")
 
 
-def test_the_default_rounding_step_lets_a_real_adjustment_through():
-    """5% steps quantise the ±2–8% a section produces onto three values. The
-    default is 1%; 5% stays available for instructors who want round numbers."""
-    assert GradeSettings().rounding_step == 1
-    coarse = results_to_frame(compute(section(), GradeSettings(rounding_step=5)))
-    fine = results_to_frame(compute(section(), GradeSettings(rounding_step=1)))
-    assert (fine["Grade Δ"].nunique() > coarse["Grade Δ"].nunique())
+def test_the_defaults_are_the_instructors():
+    """Requested (2.21.0): sensitivity 1.0, maximum increase 0%, rounding to
+    5%, rounding down."""
+    d = GradeSettings()
+    assert d.sensitivity_B == 1.0
+    assert d.max_multiplier == 1.0
+    assert d.rounding_step == 5 and d.rounding_mode == "down"
+    frame = results_to_frame(compute(section(), d))
+    deltas = {float(str(x).rstrip("%")) for x in frame["Grade Δ"]}
+    assert all(x <= 0 and x % 5 == 0 for x in deltas), deltas
+    # 1% steps still resolve more finely, for an instructor who wants that.
+    fine = results_to_frame(compute(section(), FINE))
+    assert fine["Grade Δ"].nunique() > frame["Grade Δ"].nunique()
 
 
 def test_performance_still_separates_students():
@@ -328,11 +341,13 @@ def test_a_column_that_is_the_same_for_everyone_is_dropped_and_reported():
 
 
 def test_nothing_is_dropped_from_a_section_whose_columns_all_vary():
-    frame = results_to_frame(compute(section(), GradeSettings(),
+    frame = results_to_frame(compute(section(), FINE,
                                      self_evals=self_evals(every=False)))
     shown, dropped = trim_constant_columns(frame)
-    assert dropped == {}
-    assert list(shown.columns) == list(frame.columns)
+    # With no overrides, the instructor-only Overridden column is blank for
+    # everyone, and goes like any other constant column.
+    assert dropped == {"Overridden": ""}
+    assert list(shown.columns) == [c for c in frame.columns if c != "Overridden"]
 
 
 def test_a_section_of_one_student_keeps_every_column():

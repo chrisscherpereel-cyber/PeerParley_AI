@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.21.0 — grading rules per evaluation, rough scoring, overrides, new defaults
+
+Requested: grading settings unique to each evaluation; a rough method for
+scoring the feedback students write (0 / 5 / 7 / 10); overriding a student's
+grade adjustment and response points on their report; and new defaults —
+sensitivity 1.0, maximum increase 0%, rounding to 5%, rounding down.
+
+**Each evaluation keeps its own grading rules.** They used to live in the
+browser session, so a rule changed while grading Eval 1 was still in force for
+every evaluation opened afterwards. Rules and overrides are now stored with
+the evaluation (`grading__<slug>.ppj`, encrypted), loaded when it is opened and
+saved when they change. The Grading rules tab says which evaluation it is
+editing. *Compare* grades each round by that round's own rules and overrides.
+Starting a new round from an earlier one copies its rules (never its
+overrides). Deleting an evaluation deletes its rules.
+
+**New defaults** (Grading rules tab, and *Restore defaults*): sensitivity
+**1.0**, maximum increase **0%**, rounding to **5%**, **down**. The tab states
+the consequence in words: a student at or above the team average keeps the
+team score, and any shortfall at all costs at least 5%. Evaluations graded
+before keep nothing from the old session-wide rules — open one and it shows the
+new defaults until you change them (a resumed session keeps the rules it was
+saved with).
+
+**Rough response scoring**, beside the existing quality scoring:
+
+| points | when |
+|---|---|
+| 0 | no submission |
+| 5 | under 5 words per teammate **and** about the same numbers for everyone |
+| 7 | some feedback (more writing, or numbers that told teammates apart), not constructive |
+| 10 | a specific, substantive comment for at least half of their teammates |
+
+Points scale with *Points for feedback quality* (exactly 0/5/7/10 at its
+default of 10). Each student's tier and reason are shown on their report
+panel. It changes only the response points, never the grade.
+
+**Overrides on a student's report.** *Results & reports → One student's
+report*: pick a student, and type a grade adjustment (in % of the team score)
+or response points; leave a box empty for the computed figure, or *Clear*.
+An override is applied everywhere — table, PDFs, emails, gradebook CSV — and is
+not held to the caps (the page warns when it goes past them). The computed
+figure stays visible on the panel; the results table gains an *Overridden*
+column and the summary PDF marks overridden figures with an asterisk.
+
+Also: the Grading rules controls are now keyed per evaluation, so opening
+another evaluation or pressing *Restore defaults* resets them to the rules in
+force rather than keeping a slider's last position.
+
+14 new tests (480 total) — the four tiers and their edges, scaling, overrides
+(copies, caps, stale keys), per-evaluation storage, round copy, deletion —
+plus a real-app driver: change a rule in Eval 1, confirm Eval 2 is untouched
+and Eval 1's rule returns, override a student's adjustment and points, warn
+past the cap, preview, clear. Tests that described the old defaults now say
+which rules they use.
+
 ## 2.20.2 — the other slow paths
 
 Asked: *"Are there other similar issues that are slow in the application that

@@ -140,11 +140,15 @@ check("responses ingested into a long frame",
 check("the non-submitter left no evaluation rows",
       NON_SUBMITTER not in set(long_df["evaluator"]))
 
-teams = compute(long_df, GradeSettings(sensitivity_B=0.5),
+# Fine-grained rules for the arithmetic checks below: since 2.21.0 the
+# defaults round down in 5% steps with no bonus, which can put two different
+# sensitivities on the same grade by design.
+_FINE = dict(rounding_step=1, rounding_mode="nearest", max_multiplier=1.05)
+teams = compute(long_df, GradeSettings(sensitivity_B=0.5, **_FINE),
                 self_evals=ss(at, "self_evals"))
 check("teams computed", len(teams) == 2)
 
-teams_zero = compute(long_df, GradeSettings(sensitivity_B=0.0),
+teams_zero = compute(long_df, GradeSettings(sensitivity_B=0.0, **_FINE),
                      self_evals=ss(at, "self_evals"))
 check("B=0 gives multiplier 1.0 (no peer effect)",
       abs(teams_zero[0].members[0].multiplier - 1.0) < 1e-9)

@@ -239,7 +239,7 @@ Eval 2**.
 |---|---|
 | The teams **as they are now** — every move, addition and removal made under 👥 Teams | The open and close dates — set the new round's own under *Schedule* |
 | Students who are on no team | The responses, grades and AI drafts |
-| The questions, the report settings, the instructor's clock | The students' ids: everyone gets a **new link** |
+| The questions, the report settings, the instructor's clock, the grading rules | The students' ids: everyone gets a **new link** — and any per-student grade overrides |
 
 The new round is saved straight away; set its dates, press **Save these
 settings**, and email the links. The copy never writes over a round that

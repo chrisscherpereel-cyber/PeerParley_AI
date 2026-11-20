@@ -136,6 +136,14 @@ def main(workdir: str, no_fitz: bool = False) -> int:
     app.session_state["self_evals"] = self_evals
     app.session_state["survey_cfg"] = dict(survey.DEFAULT_SURVEY)
     # Both previews on at once: the combination that used to raise.
+    # Fine-grained rules (1% steps, to the nearest, a bonus allowed), so the
+    # table can show the variety this driver checks for. Since 2.21.0 the
+    # shipped defaults round down in 5% steps with no bonus, which by design
+    # puts a section on very few distinct grades.
+    from peerparley.grading import GradeSettings
+    app.session_state["settings"] = GradeSettings(
+        sensitivity_B=0.5, max_multiplier=1.05, rounding_step=1,
+        rounding_mode="nearest")
     app.session_state["prev_instructor"] = True
     app.session_state["prev_student"] = True
     app.run()

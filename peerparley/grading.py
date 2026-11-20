@@ -73,19 +73,17 @@ def letter_grade(value) -> str:
 @dataclass
 class GradeSettings:
     team_score_default: float = 100.0
-    sensitivity_B: float = 0.5
+    # Defaults chosen by the instructor (2.21.0): full sensitivity, no bonus
+    # above the team score, and adjustments rounded DOWN to 5% steps — so a
+    # student's grade can only fall from the team score, in whole 5% steps,
+    # and any shortfall at all costs at least one step. The tab shows these
+    # consequences in words beside the controls.
+    sensitivity_B: float = 1.0
     min_multiplier: float = 0.50    # max 50% DECREASE (deduction cap)
-    max_multiplier: float = 1.05    # max  5% INCREASE (bonus cap)
+    max_multiplier: float = 1.00    # max  0% INCREASE (no bonus)
     max_comment_points: int = 10
-    # 1 or 5 (percent). The default used to be 5, and that single setting was
-    # what made the results tab look broken: a normal section produces grade
-    # adjustments in the ±2% to ±8% range, and a 5-point grid flattens all of
-    # them onto {-5, 0, +5}. Ten students came out with three distinct grades
-    # and half of them at exactly the team score — "the same for everyone",
-    # with nothing actually wrong with the data. 1% steps report what was
-    # computed; 5% is still available for instructors who want round numbers.
-    rounding_step: int = 1          # 1 or 5 (percent)
-    rounding_mode: str = "nearest"  # nearest | up | down
+    rounding_step: int = 5          # 1 or 5 (percent)
+    rounding_mode: str = "down"     # nearest | up | down
     performance_method: str = "allocation_ratio"  # allocation_ratio|rank_linear|rank_one_mean
     performance_band: float = 0.08  # +-8%
     agreement_guard: bool = True
@@ -93,6 +91,116 @@ class GradeSettings:
     #   allocation | rating | ranking | combined
     adjustment_source: str = "allocation"
     normalize_raters: bool = False   # z-score each evaluator (corrects for leniency)
+    # How the feedback each student WROTE is scored (their Response Pts):
+    #   quality — continuous, from how substantive and specific each comment
+    #             is (comments.score_comment), averaged over their teammates
+    #   rough   — four tiers, 0 / 5 / 7 / 10 (see `rough_response`)
+    response_scoring: str = "quality"
+
+
+def settings_from(data) -> "GradeSettings":
+    """GradeSettings from a stored dict, ignoring anything it does not know.
+
+    Stored settings outlive the code that wrote them: a field added later is
+    simply absent from an old record (and takes its default), and one removed
+    later would otherwise make the constructor raise and the grading tab
+    disappear.
+    """
+    if isinstance(data, GradeSettings):
+        return data
+    known = GradeSettings.__dataclass_fields__
+    clean = {k: v for k, v in dict(data or {}).items() if k in known}
+    try:
+        return GradeSettings(**clean)
+    except Exception:  # noqa: BLE001 - a bad stored value must not cost the tab
+        return GradeSettings()
+
+
+# --------------------------------------------------------------------------- #
+# Rough response scoring — 0 / 5 / 7 / 10
+# --------------------------------------------------------------------------- #
+# The instructor's rubric for the feedback a student wrote:
+#
+#   0  — no submission
+#   5  — a submission with little distinction between members and very little
+#        feedback
+#   7  — some feedback, but not constructive
+#   10 — constructive feedback
+#
+# Decided from what the student wrote about each teammate and the numbers they
+# gave them:
+#   * "very little feedback": fewer than ROUGH_MIN_WORDS words per teammate;
+#   * "little distinction": every teammate got about the same — the $100 split
+#     within ROUGH_EVEN_SPREAD of an even share, the same average rating within
+#     ROUGH_RATING_SPREAD points, and the same ranking. With one teammate
+#     there is nobody to tell apart, so it counts as little distinction;
+#   * "constructive": a specific, substantive comment (score_comment Q of at
+#     least ROUGH_CONSTRUCTIVE_Q — it names what the teammate did, or what to
+#     do next, in real sentences) for at least half of their teammates.
+# Points scale with the "Points for feedback quality" setting, so at its
+# default of 10 they are exactly 0 / 5 / 7 / 10.
+ROUGH_TIERS = {"none": 0.0, "minimal": 0.5, "some": 0.7, "constructive": 1.0}
+ROUGH_MIN_WORDS = 5
+ROUGH_EVEN_SPREAD = 0.15
+ROUGH_RATING_SPREAD = 0.5
+ROUGH_CONSTRUCTIVE_Q = 0.6
+
+ROUGH_LABEL = {
+    "none": "no submission",
+    "minimal": "very little feedback, little distinction between teammates",
+    "some": "some feedback, not constructive",
+    "constructive": "constructive feedback",
+}
+
+
+def rough_response(given: List[dict], others_written: List[str],
+                   expected_share: float) -> Tuple[str, str]:
+    """(tier, plain-English reason) for one student's submission.
+
+    `given` has one entry per teammate the student evaluated:
+    ``{"comment", "points", "rating", "rank"}`` with NaN/None where not asked.
+    """
+    if not given:
+        return "none", ROUGH_LABEL["none"]
+    slots = len(given)
+    words = [len(str(g.get("comment") or "").split()) for g in given]
+    avg_words = sum(words) / slots
+    constructive = sum(
+        1 for g in given if str(g.get("comment") or "").strip()
+        and score_comment(str(g["comment"]), others_written, 10).q
+        >= ROUGH_CONSTRUCTIVE_Q)
+
+    def _vals(field_):
+        out = []
+        for g in given:
+            v = g.get(field_)
+            try:
+                if v is not None and not math.isnan(float(v)):
+                    out.append(float(v))
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    distinct = False
+    if slots > 1:
+        pts, rts, rks = _vals("points"), _vals("rating"), _vals("rank")
+        if len(pts) > 1 and (max(pts) - min(pts)) > ROUGH_EVEN_SPREAD * max(expected_share, 1e-9):
+            distinct = True
+        if len(rts) > 1 and (max(rts) - min(rts)) >= ROUGH_RATING_SPREAD:
+            distinct = True
+        if len(rks) > 1 and len(set(rks)) > 1:
+            distinct = True
+
+    if constructive * 2 >= slots:
+        return "constructive", (f"{ROUGH_LABEL['constructive']} — specific comments "
+                                f"for {constructive} of {slots} teammate(s)")
+    if avg_words < ROUGH_MIN_WORDS and not distinct:
+        return "minimal", (f"{ROUGH_LABEL['minimal']} — about {avg_words:.0f} "
+                           f"word(s) per teammate")
+    why = ("told teammates apart in the numbers" if avg_words < ROUGH_MIN_WORDS
+           else f"about {avg_words:.0f} words per teammate")
+    return "some", (f"{ROUGH_LABEL['some']} — {why}; specific comments for "
+                    f"{constructive} of {slots}")
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +370,14 @@ class StudentResult:
     # ---- feedback the student WROTE (response quality) ----
     response_Q: float = float("nan")        # comment-support of the feedback they gave
     response_points: int = 0                # points earned for their response quality
+    response_note: str = ""                 # why (rough scoring), for the instructor
+    # ---- instructor overrides (see `apply_overrides`) ----
+    # The computed values stay here so the instructor can always see what an
+    # override replaced; the student's report shows only the final figures.
+    adjustment_overridden: bool = False
+    points_overridden: bool = False
+    computed_signed_pct: float = float("nan")
+    computed_response_points: Optional[int] = None
 
 
 @dataclass
@@ -437,6 +553,7 @@ def compute(
         ranks_recv: Dict[str, List[float]] = {k: [] for k in member_keys}
         authored: Dict[str, List[str]] = {k: [] for k in member_keys}  # comments WRITTEN by k
         authored_slots: Dict[str, int] = {}   # teammates each student was asked about
+        given_by: Dict[str, List[dict]] = {}  # what each student gave each teammate
         display_name: Dict[str, str] = {}
         has_texts = ("contribution_text" in long_df.columns
                      and "improve_text" in long_df.columns)
@@ -462,6 +579,14 @@ def compute(
             # you wrote". Without it, skipping three teammates and writing one
             # good comment would score the same as writing four.
             authored_slots[e] = authored_slots.get(e, 0) + 1
+            _rv = ([_num(r.get(f"r{d}")) for d in range(4)] if has_ratings else [])
+            _rv = [v for v in _rv if v is not None]
+            given_by.setdefault(e, []).append({
+                "comment": str(r.get("public_comment") or "").strip(),
+                "points": _num(r.get("points")),
+                "rating": (sum(_rv) / len(_rv)) if _rv else None,
+                "rank": _num(r.get("rank")) if has_rank else None,
+            })
             if r["points"] == r["points"]:
                 received[k].append(float(r["points"]))
             if r.get("public_comment"):
@@ -718,6 +843,11 @@ def compute(
             else:
                 rq, rpts = float("nan"), 0
             response_Q = rq
+            rnote = ""
+            if settings.response_scoring == "rough":
+                tier, rnote = rough_response(given_by.get(k, []),
+                                             others_written, expected_share)
+                rpts = int(round(ROUGH_TIERS[tier] * settings.max_comment_points))
 
             recv_contrib = contrib.get(k, []) if has_texts else list(all_pub)
             recv_improve = improve.get(k, []) if has_texts else []
@@ -741,12 +871,73 @@ def compute(
                 confidential_comments=conf.get(k, []),
                 received_breakdown=[round(x, 1) for x in rec],
                 response_Q=(round(response_Q, 3) if not math.isnan(response_Q) else float("nan")),
-                response_points=rpts))
+                response_points=rpts, response_note=rnote))
         members.sort(key=lambda m: m.name.lower())
         results.append(TeamResult(team=team, members=members, team_score=ts))
 
     results.sort(key=lambda t: t.team.lower())
     return results
+
+
+# --------------------------------------------------------------------------- #
+# Instructor overrides
+# --------------------------------------------------------------------------- #
+def apply_overrides(teams: List[TeamResult],
+                    overrides: Optional[Dict[str, dict]]) -> List[TeamResult]:
+    """The results with the instructor's per-student overrides applied.
+
+    `overrides` maps a student's key to ``{"adjust": <percent of the team
+    score> | None, "points": <response points> | None}``. ``adjust`` replaces
+    the computed grade change outright: -10 makes the student's score 90% of
+    the team score. It is deliberately not held to the caps on the Grading
+    rules tab — an override is the instructor's decision, and the page warns
+    when one goes past them. ``points`` replaces the Response Pts.
+
+    Returns copies: the computed results are cached, and an override must
+    never leak into them (or into another evaluation's grades). A key with no
+    student behind it — a student since removed — is ignored.
+    """
+    import copy
+    out = copy.deepcopy(teams)
+    if not overrides:
+        return out
+    for t in out:
+        for m in t.members:
+            o = overrides.get(m.key) or {}
+            adj, pts = o.get("adjust"), o.get("points")
+            if adj is not None:
+                try:
+                    pct = float(adj)
+                except (TypeError, ValueError):
+                    pct = None
+                if pct is not None and not math.isnan(pct):
+                    m.computed_signed_pct = m.signed_pct
+                    ts = m.team_score
+                    signed = round(ts * pct / 100.0, 2) + 0.0
+                    m.signed_pct = signed
+                    m.individual_score = round(ts + signed, 2)
+                    m.multiplier = round(m.individual_score / ts, 4) if ts else m.multiplier
+                    m.adjustment_overridden = True
+            if pts is not None:
+                try:
+                    p = int(round(float(pts)))
+                except (TypeError, ValueError):
+                    p = None
+                if p is not None:
+                    m.computed_response_points = m.response_points
+                    m.response_points = max(0, p)
+                    m.points_overridden = True
+    return out
+
+
+def override_summary(m: "StudentResult") -> str:
+    """'adjustment, points' — what the instructor changed for this student."""
+    parts = []
+    if m.adjustment_overridden:
+        parts.append("adjustment")
+    if m.points_overridden:
+        parts.append("points")
+    return ", ".join(parts)
 
 
 _SOURCE_LABEL = {
@@ -994,16 +1185,24 @@ COLUMN_HELP: Dict[str, str] = {
                    "no written feedback, so this dampener is switched off.",
     "Response Pts": "What the student earned for the feedback THEY wrote about "
                     "their teammates, out of the maximum on the Grading rules "
-                    "tab. Averaged over every teammate they were asked about, "
-                    "so skipping three and writing one good comment does not "
-                    "score full marks. This is the only column about their own "
+                    "tab. With quality scoring, averaged over every teammate "
+                    "they were asked about, so skipping three and writing one "
+                    "good comment does not score full marks. With rough "
+                    "scoring, one of four tiers: 0 no submission, 5 very "
+                    "little feedback and little distinction between "
+                    "teammates, 7 some feedback but not constructive, 10 "
+                    "constructive. This is the only column about their own "
                     "effort as an evaluator.",
+    "Overridden": "Which of this student's figures you set by hand on their "
+                  "report — the grade adjustment, the response points, or "
+                  "both. The student's report shows only the final figures.",
     "Individual Score": "The student's score: the team score plus the grade "
                         "change. This is the number that goes in the gradebook.",
     "Grade Δ": "Individual Score minus the team score, in points. Rounded to "
                "the step set on the Grading rules tab, and the rounded figure "
                "is what is applied, so the report and the gradebook always "
-               "agree.",
+               "agree. An asterisk on the PDF (and the Overridden column on "
+               "screen) marks one you set by hand.",
     "Performance": "High / Adequate / Expected / Low. When the survey "
                    "collected the forced ranking, this is the label the "
                    "student's teammates settled on: their average rank "
@@ -1062,6 +1261,10 @@ def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
                 # worth a column is how far their view of themselves sits from
                 # their team's; a dash answers the yes/no on the way past.
                 "Self vs peers": describe_self_gap(m.self_gap),
+                # Instructor-only: which figures on this row were set by hand.
+                # Blank for everyone means none were, and the results table
+                # then drops the column like any other constant one.
+                "Overridden": override_summary(m),
             })
     return pd.DataFrame(rows)
 

@@ -49,6 +49,8 @@ from peerparley import workspace
 from peerparley import aiconfig
 from peerparley.grading import (
     GradeSettings,
+    settings_from,
+    apply_overrides,
     compute,
     adjustment_note as grading_note,
     data_warnings as grading_warnings,
@@ -209,6 +211,16 @@ def _instructor_pdf(which: str, sig: str, course: str, eval_no: str,
     return pdfgen.build_section_summary_pdf(_teams, course, eval_no)
 
 
+def _round_grading(slug, current_settings=None):
+    """(GradeSettings, overrides) for one evaluation: the one on screen uses
+    the rules being edited; any other, what was saved for it."""
+    if slug == S.get("_grading_loaded_for"):
+        return (S.get("settings") or current_settings or GradeSettings(),
+                S.get("grade_overrides") or {})
+    g = survey.load_grading(vault_now(), slug)
+    return settings_from(g["settings"]), g["overrides"]
+
+
 def _build_comparison(course, picks, settings, sig) -> dict:
     """Everything the Compare tab shows, built once per press of its button.
 
@@ -224,7 +236,10 @@ def _build_comparison(course, picks, settings, sig) -> dict:
         if ld.empty:
             continue
         se = survey.self_evaluations(vault, slug)
-        evals.append((en, graded(ld, settings, se)))
+        # Each round is graded by its own rules, with its own overrides —
+        # the figures the students of that round were actually given.
+        rules, ovr = _round_grading(slug, settings)
+        evals.append((en, apply_overrides(graded(ld, rules, se), ovr)))
 
     by_eval, team_of, shown = {}, {}, {}
     for en, tr in evals:
@@ -455,6 +470,8 @@ try:
         # survey that does not exist yet would be a round trip for nothing.
         if _v0.seen(survey.key_roster(S["_active_slug"])):
             _first.append(survey.key_survey(S["_active_slug"]))
+        if _v0.seen(survey.key_grading(S["_active_slug"])):
+            _first.append(survey.key_grading(S["_active_slug"]))
     _v0.prefetch(_first)
 except Exception:  # noqa: BLE001 - a warm-up must never cost the page
     pass
@@ -543,6 +560,10 @@ with st.sidebar:
             # the one being resumed into: a resume is not a switch.
             S["_active_slug"] = survey.slugify(
                 _saved["course"], _saved["eval_no"] or "1")
+            if _saved.get("settings"):
+                # The rules saved with the session are this evaluation's
+                # rules: they stand, and are stored for it on the next run.
+                S["_grading_loaded_for"] = S["_active_slug"]
             S["_ws_resumed"] = True
             st.rerun()
         if r2.button("Discard", **FULL_WIDTH, key="ws_discard",
@@ -615,6 +636,25 @@ with st.sidebar:
         S["_roster_upload_gen"] = S.get("_roster_upload_gen", 0) + 1
         S["_nav_token"] = S.get("_nav_token", 0) + 1
     S["_active_slug"] = _active_slug
+
+    # ---- This evaluation's own grading rules and overrides ---------------
+    # They used to live in the session, so a rule changed while grading Eval 1
+    # was still in force when Eval 2 was opened — and every evaluation after
+    # it. Each evaluation now has its own, loaded whenever the evaluation in
+    # front of the instructor changes and saved whenever they change (end of
+    # the Grading rules tab).
+    if S.get("_grading_loaded_for") != _active_slug:
+        _g = ({"settings": {}, "overrides": {}} if not (course or "").strip()
+              else survey.load_grading(vault_now(), _active_slug))
+        if S.get("_grading_loaded_for") is None and S.get("settings") \
+                and not _g["settings"]:
+            pass        # rules restored with a resumed session stand
+        else:
+            S["settings"] = settings_from(_g["settings"])
+        S["grade_overrides"] = dict(_g["overrides"])
+        S["_grading_loaded_for"] = _active_slug
+        S["_grading_saved_sig"] = repr((dataclasses.asdict(S["settings"]),
+                                        sorted(S["grade_overrides"].items())))
 
     # ---- admin: manage instructor accounts -------------------------------
     if is_admin:
@@ -741,10 +781,11 @@ or a combination. Whichever you pick, it works the same way:
 
 > adjustment ≈ **sensitivity** × (peer factor − 100%)
 
-So a student **above** the team average gets a **bonus (+%)**, one **below** gets a
-**deduction (−%)**, and one exactly average gets **0%**. The bonus and the
-deduction are capped **separately** — by default a top student can rise at most
-**+5%**, while a low student can fall at most **−50%**. Two optional weights can
+The default sensitivity is **1.0** — the full effect. So a student **above** the
+team average would get a **bonus (+%)**, one **below** gets a **deduction (−%)**,
+and one exactly average gets **0%**. The bonus and the deduction are capped
+**separately**: by default the bonus cap is **0%** — nobody rises above the team
+score — and a low student can fall at most **−50%**. Two optional weights can
 only *shrink* the adjustment, never flip its sign:
 
 - **Agreement (A)** — if a student's evaluators disagreed with each other *more
@@ -755,13 +796,24 @@ only *shrink* the adjustment, never flip its sign:
   the dollars, the adjustment is softened. With no comments, Q is neutral (no
   effect).
 
-Adjustments are reported on the rounding step you choose on this tab. The
-default is **1%**; 5% steps turn any adjustment under ±2.5% into no change at
-all, which in a typical section is most students.
+Adjustments are rounded to the step and direction you choose on this tab. The
+default is **5% steps, rounded down**: −3.2% becomes −5%, and any shortfall at
+all — even −0.4% — becomes at least −5%. Choose 1% steps, or rounding to the
+nearest step, for a gentler scale.
 
-**4. Feedback points** — each student also earns points (default up to **5**) for
-the **quality of the feedback *they* wrote** about teammates — length, specifics,
-and whether it looks copy-pasted. This rewards taking the evaluation seriously.
+**4. Feedback points** — each student also earns points (default up to **10**)
+for **the feedback *they* wrote** about teammates. Two ways to score it:
+*quality* (continuous — length, specifics, and whether it looks copy-pasted) or
+*rough* — **0** no submission, **5** very little feedback and little distinction
+between teammates, **7** some feedback but not constructive, **10** constructive
+feedback.
+
+**Overrides.** On **④ Results & reports**, under *One student's report*, you
+can replace any student's grade adjustment or feedback points by hand. Their
+report shows the final figure; the results table marks what you changed.
+
+Every evaluation keeps **its own** grading rules and overrides — changing them
+here changes them for this evaluation only.
 
 **5. Dimension letter grades** — the four rating statements (team player, quantity,
 quality, effect) each average to a 0–100% score → a letter grade, shown to the
@@ -1397,6 +1449,163 @@ def _start_here(course: str, eval_no: str, chosen: bool = True) -> None:
                    "sees it. It stays off until you switch it on.")
 
 
+def _override_changed(student_key: str, field: str, wkey: str) -> None:
+    """A per-student override box changed: record it (saved with the rules)."""
+    v = st.session_state.get(wkey)
+    ov = {k: dict(v2) for k, v2 in (S.get("grade_overrides") or {}).items()}
+    entry = ov.get(student_key, {})
+    if v is None:
+        entry.pop(field, None)
+    else:
+        entry[field] = float(v) if field == "adjust" else int(v)
+    if entry:
+        ov[student_key] = entry
+    else:
+        ov.pop(student_key, None)
+    S["grade_overrides"] = ov
+
+
+def _override_clear(keys, wkeys) -> None:
+    ov = {k: dict(v) for k, v in (S.get("grade_overrides") or {}).items()}
+    for k in keys:
+        ov.pop(k, None)
+    for w in wkeys:
+        st.session_state[w] = None
+    S["grade_overrides"] = ov
+
+
+def _ov_wkeys(slug: str, student_key: str):
+    import hashlib
+    h = hashlib.sha1(f"{slug}|{student_key}".encode("utf-8")).hexdigest()[:12]
+    return f"ov_adj_{h}", f"ov_pts_{h}"
+
+
+def _student_report_panel(teams, course, eval_no, report, ai_reports,
+                          narratives, settings) -> None:
+    """Pick a student; override their adjustment or points; preview the report.
+
+    The boxes are empty unless an override is set, with the computed figure as
+    the placeholder, so "use what was computed" is the natural state and
+    clearing a box undoes an override. The figures the student sees are the
+    final ones; what was computed stays visible here and in the table's
+    Overridden column.
+    """
+    slug = survey.slugify(course, eval_no)
+    pairs = [(t, m) for t in teams for m in t.members]
+    if not pairs:
+        return
+    ov_all = S.get("grade_overrides") or {}
+    labels = [f"{t.team} · {m.name}" for t, m in pairs]
+    i = st.selectbox("Student", range(len(pairs)), format_func=lambda j: labels[j],
+                     key="report_pick")
+    t, m = pairs[i or 0]
+    ts = m.team_score or 100.0
+    comp_signed = (m.computed_signed_pct if m.adjustment_overridden
+                   else m.signed_pct)
+    comp_pct = (comp_signed / ts * 100.0) if ts else comp_signed
+    comp_pts = (m.computed_response_points if m.points_overridden
+                else m.response_points)
+    st.caption(
+        f"Computed: grade adjustment **{comp_pct:+g}%** (score "
+        f"{ts + comp_signed:g}) · response points **{comp_pts}** of "
+        f"{settings.max_comment_points}"
+        + (f" — {m.response_note}" if m.response_note else ""))
+    wa, wp = _ov_wkeys(slug, m.key)
+    mine = ov_all.get(m.key, {})
+    if wa not in st.session_state:
+        st.session_state[wa] = mine.get("adjust")
+    if wp not in st.session_state:
+        st.session_state[wp] = mine.get("points")
+    c1, c2, c3 = st.columns([1.2, 1.2, 0.8], vertical_alignment="bottom")
+    c1.number_input("Grade adjustment override (%)", min_value=-100.0,
+                    max_value=100.0, value=None, step=1.0, format="%g",
+                    key=wa, placeholder=f"computed {comp_pct:+g}%",
+                    on_change=_override_changed, args=(m.key, "adjust", wa),
+                    help="Replaces the computed adjustment: −10 makes this "
+                         "student's score 90% of the team score. Empty = use "
+                         "the computed figure.")
+    c2.number_input("Response points override", min_value=0, max_value=100,
+                    value=None, step=1, key=wp,
+                    placeholder=f"computed {comp_pts}",
+                    on_change=_override_changed, args=(m.key, "points", wp),
+                    help="Replaces the points for the feedback this student "
+                         "wrote. Empty = use the computed figure.")
+    if mine:
+        c3.button("Clear", key=f"ov_clear_{wa}", on_click=_override_clear,
+                  args=([m.key], [wa, wp]),
+                  help="Back to the computed figures for this student.")
+    adj = mine.get("adjust")
+    if adj is not None:
+        hi = (settings.max_multiplier - 1) * 100.0
+        lo = (settings.min_multiplier - 1) * 100.0
+        if adj > hi + 1e-9 or adj < lo - 1e-9:
+            st.warning(f"This override ({adj:+g}%) is outside the caps on the "
+                       f"Grading rules tab ({lo:+g}% to {hi:+g}%). It is "
+                       f"applied as you set it.", icon="✏️")
+    if len(ov_all):
+        names = [mm.name for _t, mm in pairs if ov_all.get(mm.key)]
+        stale = [k for k in ov_all if k not in {mm.key for _t, mm in pairs}]
+        cc1, cc2 = st.columns([3, 1], vertical_alignment="center")
+        cc1.caption(f"✎ {len(names)} student(s) with overrides in this "
+                    f"evaluation: " + ", ".join(names[:8])
+                    + ("…" if len(names) > 8 else "")
+                    + (f" (and {len(stale)} for student(s) no longer in "
+                       f"these results)" if stale else ""))
+        cc2.button("Clear all overrides", key="ov_clear_all",
+                   on_click=_override_clear,
+                   args=(list(ov_all), [w for _t, mm in pairs
+                                        for w in _ov_wkeys(slug, mm.key)]))
+
+    # Opt-in: building a PDF and rasterising it pushes a few hundred
+    # kilobytes to the browser, so it happens only when asked for.
+    if st.checkbox("Show this student's report on screen", key="prev_student",
+                   help="Builds and shows one report, with any override "
+                        "applied. The zip above has all of them."):
+        pdf = pdfgen.build_individual_pdf(
+            m, eval_no, course, report=ai_reports.get(m.key, report),
+            narrative=narratives.get(m.key, ""))
+        if narratives.get(m.key):
+            st.caption("This preview includes the approved AI narrative.")
+        _render_pdf(pdf, key="student_preview", label=f"{m.name}'s report (PDF)")
+
+
+def _grading_sig() -> str:
+    return repr((dataclasses.asdict(S.get("settings") or GradeSettings()),
+                 sorted((S.get("grade_overrides") or {}).items())))
+
+
+def _save_grading_if_changed(course: str, eval_no: str) -> None:
+    """Store this evaluation's grading rules and overrides when they change.
+
+    Written only when something actually changed, only for an evaluation that
+    has a course name, and only by someone allowed to change it. A failure is
+    said once and never takes the page down: the rules still apply for this
+    visit.
+    """
+    if not (course or "").strip():
+        return
+    slug = survey.slugify(course, eval_no)
+    if S.get("_grading_loaded_for") != slug:
+        return
+    sig = _grading_sig()
+    if S.get("_grading_saved_sig") == sig:
+        return
+    try:
+        _own = survey.survey_owner(vault_now(), slug)
+        if _own not in (None, "") and not survey.can_access(_own, user):
+            return
+        survey.save_grading(vault_now(), slug,
+                            dataclasses.asdict(S.get("settings") or GradeSettings()),
+                            S.get("grade_overrides") or {})
+        S["_grading_saved_sig"] = sig
+    except Exception as exc:  # noqa: BLE001
+        if not S.get("_grading_save_warned"):
+            S["_grading_save_warned"] = True
+            st.warning(f"These grading rules could not be saved for this "
+                       f"evaluation ({exc}). They apply for this visit.",
+                       icon="⚠️")
+
+
 _start_here(course, eval_no,
             chosen=(choice != "➕ New survey…") or bool((course or "").strip()))
 
@@ -1439,9 +1648,10 @@ with tabs[0]:
             st.markdown(f"**🔁 Start {course} · Evaluation {eval_no} from an "
                         f"earlier round**")
             st.caption("Copies the teams **as they are now** — including every "
-                       "change made under 👥 Teams — and that survey's questions "
-                       "and report settings. Not copied: the open and close "
-                       "dates, and the responses. Every student gets a new link, "
+                       "change made under 👥 Teams — and that survey's questions, "
+                       "report settings and grading rules. Not copied: the open "
+                       "and close dates, the responses, and any grade "
+                       "overrides. Every student gets a new link, "
                        "so the two rounds never mix. Or skip this and upload a "
                        "contact list below.")
             _rlabels = [f"{(r['course'] or '(no course)')} · Eval {r['eval_no']} — "
@@ -2183,6 +2393,7 @@ with tabs[2]:
                             "and grades are simply recomputed."):
             S["settings"] = GradeSettings()
             S["_settings_defaulted"] = True
+            S["_gs_gen"] = S.get("_gs_gen", 0) + 1
             st.rerun()
         _rc2.caption(
             f"{len(_changed)} setting(s) differ from the defaults: "
@@ -2190,11 +2401,18 @@ with tabs[2]:
                         for f, old, new in _changed[:4])
             + (f", +{len(_changed) - 4} more" if len(_changed) > 4 else ""))
 
+    # Keyed by evaluation (and by a generation number that "Restore
+    # defaults" moves on), so every control shows *this* evaluation's rules:
+    # opening another evaluation, or restoring the defaults, starts the
+    # controls afresh from the rules in force rather than carrying over the
+    # last position of the slider.
+    _gk = (survey.slugify(course, eval_no).replace("-", "_")
+           + f"_{S.get('_gs_gen', 0)}")
     st.markdown("##### Peer-adjustment method")
     _sources = ["allocation", "rating", "ranking", "combined"]
     adj_source = st.selectbox(
         "How to measure each student's peer contribution",
-        _sources,
+        _sources, key=f"gs_src_{_gk}",
         index=_sources.index(_gs0.adjustment_source)
         if _gs0.adjustment_source in _sources else 0,
         format_func=lambda x: {
@@ -2212,43 +2430,74 @@ with tabs[2]:
     with c1:
         B = st.slider("Sensitivity (how strongly peers move the grade)",
                       0.0, 1.5, float(_gs0.sensitivity_B), 0.05,
+                      key=f"gs_B_{_gk}",
                       help="0 means peers do not move the grade at all; 1 means the "
-                           "full effect of their ratings. 0.5 is the usual starting "
-                           "point.")
+                           "full effect of their ratings (the default).")
     with c2:
         maxpts = st.number_input("Points for feedback quality", 1, 40,
                                  int(_gs0.max_comment_points),
-                                 help="Points a student earns for the quality of the "
-                                      "feedback THEY wrote about teammates. The "
-                                      "explainer above uses this number.")
+                                 key=f"gs_pts_{_gk}",
+                                 help="Points a student earns for the feedback "
+                                      "THEY wrote about teammates. Default 10.")
+    _scorings = ["quality", "rough"]
+    resp_scoring = st.radio(
+        "How to score the feedback each student wrote",
+        _scorings, key=f"gs_resp_{_gk}",
+        index=_scorings.index(_gs0.response_scoring)
+        if _gs0.response_scoring in _scorings else 0,
+        format_func=lambda x: {
+            "quality": "Quality — continuous, from how specific and substantive "
+                       "each comment is",
+            "rough": "Rough — four tiers: 0 / 5 / 7 / 10",
+        }[x],
+        horizontal=True,
+        help="Rough scoring: 0 no submission · 5 very little feedback and little "
+             "distinction between teammates · 7 some feedback but not "
+             "constructive · 10 constructive feedback (specific comments for at "
+             "least half of their teammates). Points scale with the number "
+             "above, so at 10 they are exactly 0 / 5 / 7 / 10.")
+    if resp_scoring == "rough":
+        _m = int(maxpts)
+        st.caption(
+            f"Rough tiers at {_m} points: **0** no submission · "
+            f"**{round(_m * 0.5)}** submitted, but under five words per teammate "
+            f"and about the same numbers for everyone · **{round(_m * 0.7)}** "
+            f"some feedback, not constructive · **{_m}** constructive — a specific, "
+            f"substantive comment for at least half of their teammates. Each "
+            f"student's reason is on their row in the results.")
     c3, c4 = st.columns(2)
     with c3:
         max_inc = st.slider("Maximum INCREASE (bonus cap, %)", 0, 50,
                             int(round((_gs0.max_multiplier - 1) * 100)), 1,
+                            key=f"gs_inc_{_gk}",
                             help="The most a top student's grade can rise above the team "
-                                 "score. Default 5%.")
+                                 "score. Default 0% — nobody rises above it.")
     with c4:
         max_dec = st.slider("Maximum DECREASE (deduction cap, %)", 0, 100,
                             int(round((1 - _gs0.min_multiplier) * 100)), 1,
+                            key=f"gs_dec_{_gk}",
                             help="The most a low student's grade can fall below the team "
                                  "score. Default 50%.")
 
     with st.expander("Advanced options (most instructors leave these alone)"):
         team_default = st.number_input("Default team score (before peer adjustment)",
-                                       0.0, 200.0, float(_gs0.team_score_default))
+                                       0.0, 200.0, float(_gs0.team_score_default),
+                                       key=f"gs_team_{_gk}")
         normalize = st.checkbox("Correct for easy and harsh graders",
                                 value=bool(_gs0.normalize_raters),
+                                key=f"gs_norm_{_gk}",
                                 help="Some students spread their $100 evenly and others "
                                      "swing it wildly. This puts every rater on the same "
                                      "scale before comparing students, so one generous or "
                                      "one severe teammate counts no more than the rest. "
                                      "Applies to the $100 and combined methods.")
         guard = st.checkbox("Agreement guard — soften a forced 'Low' when evaluators "
-                            "strongly disagree", value=bool(_gs0.agreement_guard))
+                            "strongly disagree", value=bool(_gs0.agreement_guard),
+                            key=f"gs_guard_{_gk}")
         _perf_methods = ["allocation_ratio", "rank_linear", "rank_one_mean"]
         perf_method = st.selectbox(
             "Performance label when there's NO forced ranking",
-            _perf_methods,
+            _perf_methods, key=f"gs_perf_{_gk}",
             index=_perf_methods.index(_gs0.performance_method)
             if _gs0.performance_method in _perf_methods else 0,
             format_func=lambda x: {
@@ -2259,18 +2508,24 @@ with tabs[2]:
             help="Forced ranking is used automatically when the survey collected it; "
                  "this only applies otherwise.")
         band = st.slider("Performance band ± (for the average-based label)",
-                         0.0, 0.25, float(_gs0.performance_band), 0.01)
-        rstep = st.selectbox("Round adjustments to", [1, 5],
+                         0.0, 0.25, float(_gs0.performance_band), 0.01,
+                         key=f"gs_band_{_gk}")
+        # Labels rather than numbers with a formatter: Streamlit's test
+        # harness mangles a "%" produced by format_func on a keyed widget.
+        rstep = int(st.selectbox("Round adjustments to", ["1%", "5%"],
                              index=1 if int(_gs0.rounding_step) == 5 else 0,
-                             format_func=lambda x: f"{x}%",
+                             key=f"gs_step_{_gk}",
                              help="This is applied to the grade, not just to the "
-                                  "number shown: at 5%, an adjustment of +4.4% "
-                                  "becomes +5% in the gradebook as well as in the "
-                                  "report.")
+                                  "number shown: the rounded figure is what goes "
+                                  "in the gradebook as well as in the report. "
+                                  "Default 5%.").rstrip("%"))
         _modes = ["nearest", "up", "down"]
         rmode = st.selectbox("Rounding direction", _modes,
+                             help="Down (the default) rounds toward the lower "
+                                  "grade: −3% becomes −5%, +4% becomes 0%.",
                              index=_modes.index(_gs0.rounding_mode)
-                             if _gs0.rounding_mode in _modes else 0)
+                             if _gs0.rounding_mode in _modes else 0,
+                             key=f"gs_mode_{_gk}")
 
     S["settings"] = GradeSettings(
         team_score_default=team_default, sensitivity_B=B,
@@ -2278,7 +2533,9 @@ with tabs[2]:
         max_comment_points=int(maxpts), rounding_step=int(rstep), rounding_mode=rmode,
         performance_method=perf_method, performance_band=band, agreement_guard=guard,
         adjustment_source=adj_source, normalize_raters=normalize,
+        response_scoring=resp_scoring,
     )
+    _save_grading_if_changed(course, eval_no)
     _method_words = {
         "allocation": "the $100 each student shares out",
         "rating": "the four rating statements",
@@ -2288,7 +2545,13 @@ with tabs[2]:
     st.success(f"Grades will be adjusted using **{_method_words}**. A top student can "
                f"rise at most **+{max_inc}%** and a struggling one can fall at most "
                f"**−{max_dec}%** from the team score, in steps of {rstep}%.")
-    if int(rstep) == 5:
+    if int(rstep) == 5 and rmode == "down":
+        # The consequence of the default, in words, before anyone sees results.
+        st.caption("Rounded **down** in 5% steps: −3% becomes −5%, and any "
+                   "shortfall at all — even −0.4% — costs a full 5%. A student "
+                   "exactly at the team average, or above it, keeps the team "
+                   "score. Choose *nearest* or 1% steps for a gentler scale.")
+    elif int(rstep) == 5:
         # Rounding now decides the grade rather than only the label on it, so
         # the step size has a consequence worth stating before anyone sees the
         # results: at 5%, anything under ±2.5% becomes no change at all.
@@ -2296,6 +2559,8 @@ with tabs[2]:
                    "change — which is most students in a typical section. Choose "
                    "1% steps if you want the smaller differences to show up in "
                    "the grade.")
+    st.caption(f"These rules belong to **{course or '(no course)'} · Evaluation "
+               f"{eval_no}** only. Other evaluations keep their own.")
 
 # =========================================================================== #
 # TAB 4 — Review + PDFs
@@ -2310,7 +2575,11 @@ with tabs[3]:
                 "**① Set up survey** tab.")
     else:
         settings = S.get("settings", GradeSettings())
-        teams = graded(S["long_df"], settings, S.get("self_evals"))
+        # The instructor's per-student overrides go on top of the computed
+        # grades here, once, so the table, every PDF and every email below
+        # carry the same figures.
+        teams = apply_overrides(graded(S["long_df"], settings, S.get("self_evals")),
+                                S.get("grade_overrides"))
         S["teams"] = teams
         if not teams:
             st.warning("No teams were found in the responses. Every student needs a "
@@ -2476,29 +2745,14 @@ with tabs[3]:
                                      f"peerparley_{course or 'section'}_eval{eval_no}.zip",
                                      "application/zip")
 
-            # Opt-in, like the instructor previews: the body of an expander runs
-            # whether or not it is open, so this was building a PDF and
-            # rasterising every page of it on every rerun — measured at a tenth
-            # of a second and a few hundred kilobytes pushed to the browser,
-            # for a panel nobody had opened.
-            if st.checkbox("Preview one student's report on screen",
-                           key="prev_student",
-                           help="Builds and shows one report. The zip above has "
-                                "all of them."):
-                names = [f"{t.team} · {m.name}" for t in teams for m in t.members]
-                pick = st.selectbox("Student", names) if names else None
-                if pick:
-                    ti, ni = pick.split(" · ", 1)
-                    m = next(m for t in teams for m in t.members
-                             if t.team == ti and m.name == ni)
-                    pdf = pdfgen.build_individual_pdf(
-                        m, eval_no, course,
-                        report=ai_reports.get(m.key, report),
-                        narrative=narratives.get(m.key, ""))
-                    if narratives.get(m.key):
-                        st.caption("This preview includes the approved AI narrative.")
-                    _render_pdf(pdf, key="student_preview",
-                                label=f"{m.name}'s report (PDF)")
+            # ---- One student's report: overrides and preview ---------------
+            st.markdown("##### One student's report")
+            st.caption("Pick a student to set their grade adjustment or feedback "
+                       "points by hand, or to see their report. Leave a box empty "
+                       "to use the computed figure. Overrides belong to this "
+                       "evaluation only.")
+            _student_report_panel(teams, course, eval_no, report, ai_reports,
+                                  narratives, settings)
 
 # =========================================================================== #
 # TAB 5 — Email
@@ -2543,7 +2797,10 @@ with tabs[5]:
             # pressed and *kept*. It used to set a flag that was never cleared,
             # so after the first press it was rebuilt on every click anywhere
             # in the app for the rest of the session, PDF included.
-            _sig = (course, tuple(picks), dataclasses.astuple(settings))
+            _sig = (course, tuple(picks), tuple(
+                repr((dataclasses.astuple(_r), sorted(_o.items())))
+                for _r, _o in (_round_grading(survey.slugify(course, _en),
+                                              settings) for _en in picks)))
             _built = S.get("cmp_result")
             if _built and _built.get("sig") != _sig:
                 st.info("Your choice of rounds or grading rules has changed — "

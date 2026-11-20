@@ -362,9 +362,13 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
         ("A", "A (agreement)", lambda m: f"{m.A:.2f}", 0.40),
         ("Q", "Q (support)",
          lambda m: "—" if _is_nan(m.Q) else f"{m.Q:.2f}", 0.40),
-        ("Resp", "Response Pts", lambda m: str(m.response_points), 0.50),
+        # An asterisk marks a figure the instructor set by hand.
+        ("Resp", "Response Pts",
+         lambda m: str(m.response_points)
+         + ("*" if getattr(m, "points_overridden", False) else ""), 0.50),
         ("Grade Δ", "Grade Δ",
-         lambda m: f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%", 0.60),
+         lambda m: f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%"
+         + ("*" if getattr(m, "adjustment_overridden", False) else ""), 0.60),
         ("Score", "Individual Score", lambda m: f"{m.individual_score:g}", 0.60),
         ("Perf", "Performance", lambda m: m.performance[:9], 0.80),
         ("Self v peers", "Self vs peers",
