@@ -303,22 +303,50 @@ def load_grading(vault: Vault, slug: str) -> Dict[str, Any]:
         return {"settings": {}, "overrides": {}}
     if not isinstance(got, dict):
         return {"settings": {}, "overrides": {}}
-    return {"settings": dict(got.get("settings") or {}),
-            "overrides": {str(k): dict(v) for k, v in
-                          (got.get("overrides") or {}).items()
-                          if isinstance(v, dict)}}
+    out = {"settings": dict(got.get("settings") or {}),
+           "overrides": {str(k): dict(v) for k, v in
+                         (got.get("overrides") or {}).items()
+                         if isinstance(v, dict)}}
+    if isinstance(got.get("loaded"), dict):
+        out["loaded"] = dict(got["loaded"])
+    return out
 
 
 def save_grading(vault: Vault, slug: str, settings: Dict,
-                 overrides: Optional[Dict] = None) -> None:
-    """Store one evaluation's grading rules and overrides (encrypted)."""
+                 overrides: Optional[Dict] = None,
+                 loaded: Optional[Dict] = None) -> None:
+    """Store one evaluation's grading rules and overrides (encrypted).
+
+    ``loaded`` — how many submissions were graded the last time responses
+    were loaded, and when — is kept as it was unless a new value is given.
+    """
     clean = {}
     for k, v in (overrides or {}).items():
         v = {f: v.get(f) for f in ("adjust", "points") if v.get(f) is not None}
         if v:
             clean[str(k)] = v
-    _save_json(vault, key_grading(slug),
-               {"settings": dict(settings or {}), "overrides": clean})
+    record = {"settings": dict(settings or {}), "overrides": clean}
+    if loaded is None:
+        loaded = load_grading(vault, slug).get("loaded")
+    if loaded:
+        record["loaded"] = dict(loaded)
+    _save_json(vault, key_grading(slug), record)
+
+
+def note_loaded(vault: Vault, slug: str, count: int) -> Optional[Dict]:
+    """Record that `count` submissions were just loaded for grading.
+
+    Returns what was recorded the time before (or None), so the page can say
+    when submissions have arrived since — which matters most after feedback
+    has gone out, because a late submission changes teammates' grades.
+    """
+    from datetime import datetime as _dt
+    prev = load_grading(vault, slug)
+    save_grading(vault, slug, prev.get("settings") or {},
+                 prev.get("overrides") or {},
+                 {"count": int(count),
+                  "at": _dt.now().isoformat(timespec="minutes")})
+    return prev.get("loaded")
 
 
 def key_response(slug: str, member_id: str) -> str:

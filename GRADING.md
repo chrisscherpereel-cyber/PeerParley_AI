@@ -61,13 +61,13 @@ grade_Δ (signed_pct) = individual − team_score         # rounded to your step
 - **caps** — the bonus and the deduction are capped separately: *Maximum
   increase* defaults to **0%** (nobody rises above the team score) and *Maximum
   decrease* to **50%**.
-- **rounding (default 5% steps, rounded down)** — the rounded figure is the
-  grade. Rounding *down* means any shortfall at all costs at least one step:
-  −0.4% becomes −5%, −6% becomes −10%; a student at or above the team average
-  keeps the team score. Choose 1% steps or *nearest* for a gentler scale.
+- **rounding (default 5% steps, to the nearest)** — the rounded figure is the
+  grade: −2% becomes no change, −3% becomes −5%, −8% becomes −10%. *Down*
+  rounds every shortfall to at least one step; 1% steps show smaller
+  differences.
 
-These defaults are from 2.21.0. Before it they were B 0.5, a 5% bonus cap and
-1% steps to the nearest.
+These defaults are from 2.21.0–2.21.1. Before them they were B 0.5, a 5% bonus
+cap, 1% steps to the nearest, and quality scoring.
 
 *Example:* team average $40; a student averaging $70 received → pay grade 175% → a
 bonus; one averaging $20 → 50% → a deduction; one at $40 → 100% → no change.
@@ -115,10 +115,10 @@ Points for the feedback a student **wrote** about their teammates (default
 max **10**), separate from the grade adjustment. Two methods, chosen on the
 *Grading rules* tab:
 
-- **Quality** *(default)* — the same comment scorer, applied to what the
+- **Quality** — the same comment scorer, applied to what the
   student wrote: `points = round(Q_author × max_points)`, averaged over every
   teammate they were asked about.
-- **Rough** — four tiers, scaled to the maximum (exactly these at 10):
+- **Rough** *(default)* — four tiers, scaled to the maximum (exactly these at 10):
 
   | points | when |
   |---|---|

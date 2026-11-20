@@ -73,17 +73,17 @@ def letter_grade(value) -> str:
 @dataclass
 class GradeSettings:
     team_score_default: float = 100.0
-    # Defaults chosen by the instructor (2.21.0): full sensitivity, no bonus
-    # above the team score, and adjustments rounded DOWN to 5% steps — so a
-    # student's grade can only fall from the team score, in whole 5% steps,
-    # and any shortfall at all costs at least one step. The tab shows these
-    # consequences in words beside the controls.
+    # Defaults chosen by the instructor: full sensitivity and no bonus above
+    # the team score (2.21.0), adjustments rounded to the NEAREST 5% step and
+    # rough response scoring (2.21.1). So a student's grade can only fall from
+    # the team score, in whole 5% steps, and a shortfall under 2.5% rounds to
+    # no change. The tab shows these consequences in words.
     sensitivity_B: float = 1.0
     min_multiplier: float = 0.50    # max 50% DECREASE (deduction cap)
     max_multiplier: float = 1.00    # max  0% INCREASE (no bonus)
     max_comment_points: int = 10
     rounding_step: int = 5          # 1 or 5 (percent)
-    rounding_mode: str = "down"     # nearest | up | down
+    rounding_mode: str = "nearest"  # nearest | up | down
     performance_method: str = "allocation_ratio"  # allocation_ratio|rank_linear|rank_one_mean
     performance_band: float = 0.08  # +-8%
     agreement_guard: bool = True
@@ -92,10 +92,10 @@ class GradeSettings:
     adjustment_source: str = "allocation"
     normalize_raters: bool = False   # z-score each evaluator (corrects for leniency)
     # How the feedback each student WROTE is scored (their Response Pts):
+    #   rough   — four tiers, 0 / 5 / 7 / 10 (see `rough_response`); default
     #   quality — continuous, from how substantive and specific each comment
     #             is (comments.score_comment), averaged over their teammates
-    #   rough   — four tiers, 0 / 5 / 7 / 10 (see `rough_response`)
-    response_scoring: str = "quality"
+    response_scoring: str = "rough"
 
 
 def settings_from(data) -> "GradeSettings":

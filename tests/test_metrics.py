@@ -113,6 +113,11 @@ def test_the_flags_say_what_is_missing_in_words():
 # How the score becomes a per-student metric
 # --------------------------------------------------------------------------- #
 
+# These tests are about the continuous (quality) scoring of the feedback a
+# student wrote; since 2.21.1 the default is the rough 0/5/7/10 tiers.
+QUALITY = GradeSettings(response_scoring="quality")
+
+
 def section(comment_by_author: dict, dollars: dict | None = None,
             ratings: dict | None = None) -> pd.DataFrame:
     """A team where each student writes `comment_by_author[name]` about everyone."""
@@ -208,7 +213,7 @@ def test_feedback_points_average_across_teammates_rather_than_taking_the_best():
     # Bob writes one good comment, about Ann only.
     df.loc[(df["evaluator"] == "Bob") & (df["evaluatee"] == "Ann"),
            "public_comment"] = LADDER[0]
-    members = {m.name: m for t in compute(df, GradeSettings()) for m in t.members}
+    members = {m.name: m for t in compute(df, QUALITY) for m in t.members}
     assert members["Bob"].response_points < members["Ann"].response_points
     assert members["Bob"].response_points < members["Cid"].response_points
     assert members["Ann"].response_points >= 6
@@ -219,8 +224,8 @@ def test_skipping_teammates_costs_points():
     partial = full.copy()
     partial.loc[(partial["evaluator"] == "Bob")
                 & (partial["evaluatee"] != "Ann"), "public_comment"] = ""
-    a = {m.name: m for t in compute(full, GradeSettings()) for m in t.members}
-    b = {m.name: m for t in compute(partial, GradeSettings()) for m in t.members}
+    a = {m.name: m for t in compute(full, QUALITY) for m in t.members}
+    b = {m.name: m for t in compute(partial, QUALITY) for m in t.members}
     assert b["Bob"].response_points < a["Bob"].response_points
     assert b["Bob"].response_Q == pytest.approx(a["Bob"].response_Q / 3, abs=0.05)
 

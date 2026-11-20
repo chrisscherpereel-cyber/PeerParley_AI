@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.21.1 — responses load themselves; rough scoring and nearest rounding by default
+
+Asked: *"Change the default to rough scoring and round to nearest. I should not
+have to reload responses in step 2 if I have done it already when I reenter
+the application … was this done for a reason?"*
+
+**Defaults.** Response points now default to **rough** scoring (0 / 5 / 7 /
+10) and adjustments to 5% steps rounded to the **nearest** step (−2% → no
+change, −3% → −5%). Sensitivity 1.0 and the 0% bonus cap are unchanged. An
+evaluation whose rules were already saved keeps them.
+
+**Responses are loaded when an evaluation is opened.** The submissions were
+always in storage, but the graded copy of them lived only in the browser
+session — partly on purpose: loading was a deliberate snapshot, so grades did
+not shift while the instructor worked, and it reads every submission. The
+cost was that every sign-in and every switch between evaluations started with
+nothing to grade, even after feedback had gone out; the sidebar's *Resume it*
+only covered the most recent session, and only if chosen.
+
+Now, when an evaluation that has submissions is opened, they are loaded and
+graded straight away (once per opening; the per-evaluation grading rules and
+overrides come with it). Tab ② says so, and its button becomes **Reload
+responses** for anything that arrives while you work. The snapshot's one real
+benefit is kept: each load is recorded with the evaluation, so if submissions
+arrived after the last load the page says how many and when, and warns that
+grades may differ from feedback already sent. Never loaded automatically:
+someone else's evaluation, one with no submissions, or data brought in another
+way (a Qualtrics upload, a resumed session).
+
+2 new tests (482 total), including a real-app driver: open an evaluation and
+find it graded; a late submission is loaded on the next visit and called out;
+the three cases above are left alone. The release matrix now runs state B
+with its responses loaded automatically (398 renders, no failures).
+
 ## 2.21.0 — grading rules per evaluation, rough scoring, overrides, new defaults
 
 Requested: grading settings unique to each evaluation; a rough method for

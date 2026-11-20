@@ -203,12 +203,14 @@ def test_the_grade_columns_are_not_the_same_for_everyone():
 
 
 def test_the_defaults_are_the_instructors():
-    """Requested (2.21.0): sensitivity 1.0, maximum increase 0%, rounding to
-    5%, rounding down."""
+    """Requested: sensitivity 1.0, maximum increase 0%, rounding to 5%
+    (2.21.0); rounding to the nearest step and rough response scoring
+    (2.21.1)."""
     d = GradeSettings()
     assert d.sensitivity_B == 1.0
     assert d.max_multiplier == 1.0
-    assert d.rounding_step == 5 and d.rounding_mode == "down"
+    assert d.rounding_step == 5 and d.rounding_mode == "nearest"
+    assert d.response_scoring == "rough"
     frame = results_to_frame(compute(section(), d))
     deltas = {float(str(x).rstrip("%")) for x in frame["Grade Δ"]}
     assert all(x <= 0 and x % 5 == 0 for x in deltas), deltas

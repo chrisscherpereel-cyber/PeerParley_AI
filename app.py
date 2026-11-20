@@ -447,6 +447,32 @@ def graded(long_df: pd.DataFrame, settings: GradeSettings, self_evals=None):
                                self_evals or {})
     except Exception:  # noqa: BLE001 - an uncacheable input must still grade
         return compute(long_df, settings, self_evals=self_evals or {})
+def _load_responses(slug: str, submissions: int):
+    """Load one evaluation's submissions into grading. Returns (rows, prev).
+
+    `prev` is what was recorded the last time this evaluation was loaded
+    ({"count", "at"}), or None — so a caller can say what has arrived since.
+    """
+    vault = vault_now()
+    long_df = survey.responses_to_long(vault, slug)
+    if long_df.empty:
+        return 0, None
+    S["long_df"] = long_df
+    S["self_evals"] = survey.self_evaluations(vault, slug)
+    snap = survey.load_roster_snapshot(vault, slug)
+    S["roster"] = survey.roster_for_matching(snap)
+    # Remembered so a later submission does not go unnoticed: loading is a
+    # snapshot, and nothing used to say when the snapshot had fallen behind.
+    S["loaded_submissions"] = submissions
+    S["loaded_slug"] = slug
+    prev = None
+    try:
+        prev = survey.note_loaded(vault, slug, submissions)
+    except Exception:  # noqa: BLE001 - a bookkeeping write must not block grading
+        pass
+    return len(long_df), prev
+
+
 user = st.session_state.get("pp_user") or {"user": "admin", "name": "Administrator",
                                            "role": "admin", "source": "secrets"}
 is_admin = accounts.is_admin(user)
@@ -656,6 +682,41 @@ with st.sidebar:
         S["_grading_saved_sig"] = repr((dataclasses.asdict(S["settings"]),
                                         sorted(S["grade_overrides"].items())))
 
+    # ---- This evaluation's responses, loaded on the way in ---------------
+    # Responses live in storage, but the graded copy of them lived only in
+    # the browser session: every visit — every sign-in, every switch between
+    # evaluations — began with nothing to grade until "Load responses into
+    # grading" was pressed again, even for an evaluation whose feedback had
+    # already gone out. Now an evaluation that has submissions is loaded as
+    # soon as it is opened. Once per opening: a deliberate reload is still the
+    # button on tab ②, and data brought in some other way (a Qualtrics upload,
+    # a resumed session) is never replaced.
+    if ((course or "").strip() and "long_df" not in S
+            and S.get("_autoloaded_for") != _active_slug):
+        S["_autoloaded_for"] = _active_slug
+        try:
+            _v = vault_now()
+            _own_al = survey.survey_owner(_v, _active_slug)
+            _n_sub = survey.response_count(_v, _active_slug)
+            if _n_sub and (_own_al in (None, "")
+                           or survey.can_access(_own_al, user)):
+                _rows, _prev = _load_responses(_active_slug, _n_sub)
+                if _rows:
+                    _was = int((_prev or {}).get("count") or 0)
+                    S["_autoload_note"] = (
+                        f"Loaded all {_n_sub} submission(s) for this evaluation "
+                        f"automatically."
+                        + (f" **{_n_sub - _was} arrived after you last loaded "
+                           f"it** ({(_prev or {}).get('at', '').replace('T', ' ')}"
+                           f") and {'is' if _n_sub - _was == 1 else 'are'} now "
+                           f"included — if feedback has already "
+                           f"gone out, some grades may differ from what "
+                           f"students were sent." if _prev and _n_sub > _was
+                           else ""))
+                    st.rerun()
+        except Exception:  # noqa: BLE001 - the button on tab ② still works
+            pass
+
     # ---- admin: manage instructor accounts -------------------------------
     if is_admin:
         st.divider()
@@ -797,16 +858,15 @@ only *shrink* the adjustment, never flip its sign:
   effect).
 
 Adjustments are rounded to the step and direction you choose on this tab. The
-default is **5% steps, rounded down**: −3.2% becomes −5%, and any shortfall at
-all — even −0.4% — becomes at least −5%. Choose 1% steps, or rounding to the
-nearest step, for a gentler scale.
+default is **5% steps, to the nearest**: −2% becomes no change, −3% becomes
+−5%, −8% becomes −10%. Choose 1% steps if you want smaller differences to show.
 
 **4. Feedback points** — each student also earns points (default up to **10**)
-for **the feedback *they* wrote** about teammates. Two ways to score it:
-*quality* (continuous — length, specifics, and whether it looks copy-pasted) or
-*rough* — **0** no submission, **5** very little feedback and little distinction
-between teammates, **7** some feedback but not constructive, **10** constructive
-feedback.
+for **the feedback *they* wrote** about teammates. Two ways to score it: *rough*
+(the default) — **0** no submission, **5** very little feedback and little
+distinction between teammates, **7** some feedback but not constructive, **10**
+constructive feedback — or *quality* (continuous — length, specifics, and
+whether it looks copy-pasted).
 
 **Overrides.** On **④ Results & reports**, under *One student's report*, you
 can replace any student's grade adjustment or feedback points by hand. Their
@@ -2327,30 +2387,27 @@ with tabs[1]:
 
         st.divider()
         st.markdown("##### Grade the collected responses")
-        st.caption("Pulls every submission, turns it into the grading input, and hands "
-                   "it to the Review / PDF / Email tabs — no Qualtrics upload needed.")
-        if st.button("⬇ Load responses into grading", type="primary"):
-            long_df = survey.responses_to_long(vault, slug)
-            if long_df.empty:
+        st.caption("Every submission is loaded into grading automatically when you "
+                   "open this evaluation. Press **Reload responses** to bring in "
+                   "ones that arrive while you are working.")
+        if S.get("_autoload_note"):
+            st.info(S.pop("_autoload_note"), icon="📥")
+        _btn = ("🔄 Reload responses" if S.get("loaded_slug") == slug
+                else "⬇ Load responses into grading")
+        if st.button(_btn, type="primary", key="load_responses"):
+            n_rows, _ = _load_responses(slug, got)
+            if not n_rows:
                 st.warning("No responses collected yet.")
             else:
-                S["long_df"] = long_df
-                S["self_evals"] = survey.self_evaluations(vault, slug)
-                snap = survey.load_roster_snapshot(vault, slug)
-                S["roster"] = survey.roster_for_matching(snap)
-                # Remembered so a later submission does not go unnoticed:
-                # loading is a snapshot, and nothing used to say when the
-                # snapshot had fallen behind.
-                S["loaded_submissions"] = got
-                S["loaded_slug"] = slug
-                st.success(f"Loaded {len(long_df)} evaluation rows from {got} submission(s). "
+                st.success(f"Loaded {n_rows} evaluation rows from {got} submission(s). "
                            "Open **④ Results & reports** to grade, then **⑤ Send feedback**.")
         elif (S.get("loaded_slug") == slug
               and got > int(S.get("loaded_submissions") or 0)):
             _new = got - int(S.get("loaded_submissions") or 0)
             st.info(f"**{_new} new submission(s)** have arrived since you loaded "
                     f"these responses. The grades on tab ④ do not include them yet "
-                    f"— click the button above again to bring them in.", icon="🆕")
+                    f"— click **Reload responses** above to bring them in.",
+                    icon="🆕")
 
 # =========================================================================== #
 # TAB 3 — Configure grading
@@ -2439,7 +2496,7 @@ with tabs[2]:
                                  key=f"gs_pts_{_gk}",
                                  help="Points a student earns for the feedback "
                                       "THEY wrote about teammates. Default 10.")
-    _scorings = ["quality", "rough"]
+    _scorings = ["rough", "quality"]
     resp_scoring = st.radio(
         "How to score the feedback each student wrote",
         _scorings, key=f"gs_resp_{_gk}",
@@ -2448,7 +2505,7 @@ with tabs[2]:
         format_func=lambda x: {
             "quality": "Quality — continuous, from how specific and substantive "
                        "each comment is",
-            "rough": "Rough — four tiers: 0 / 5 / 7 / 10",
+            "rough": "Rough — four tiers: 0 / 5 / 7 / 10 (default)",
         }[x],
         horizontal=True,
         help="Rough scoring: 0 no submission · 5 very little feedback and little "
@@ -2521,8 +2578,9 @@ with tabs[2]:
                                   "Default 5%.").rstrip("%"))
         _modes = ["nearest", "up", "down"]
         rmode = st.selectbox("Rounding direction", _modes,
-                             help="Down (the default) rounds toward the lower "
-                                  "grade: −3% becomes −5%, +4% becomes 0%.",
+                             help="Nearest (the default) rounds to the closest "
+                                  "step: −2% becomes 0%, −3% becomes −5%. Down "
+                                  "always rounds toward the lower grade.",
                              index=_modes.index(_gs0.rounding_mode)
                              if _gs0.rounding_mode in _modes else 0,
                              key=f"gs_mode_{_gk}")

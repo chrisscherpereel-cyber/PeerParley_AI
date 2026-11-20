@@ -112,10 +112,10 @@ def test_rough_points_scale_with_the_maximum():
             m["Cid"].response_points, m["Eve"].response_points) == (10, 14, 20, 0)
 
 
-def test_quality_scoring_is_unchanged_and_still_the_default():
-    assert GradeSettings().response_scoring == "quality"
+def test_rough_is_the_default_and_quality_scoring_is_unchanged():
+    assert GradeSettings().response_scoring == "rough"        # 2.21.1
     df = team({"Ann": "fine", "Bob": VAGUE, "Cid": GOOD})
-    q = _by_name(compute(df, GradeSettings()))
+    q = _by_name(compute(df, GradeSettings(response_scoring="quality")))
     assert q["Ann"].response_note == ""
     assert q["Ann"].response_points < q["Bob"].response_points < q["Cid"].response_points
 
@@ -123,7 +123,7 @@ def test_quality_scoring_is_unchanged_and_still_the_default():
 def test_rough_scoring_does_not_touch_the_grade():
     df = team({"Ann": "fine", "Bob": VAGUE, "Cid": GOOD},
               dollars={"Ann": {"Bob": 50, "Cid": 30, "Eve": 20}})
-    a = _by_name(compute(df, GradeSettings()))
+    a = _by_name(compute(df, GradeSettings(response_scoring="quality")))
     b = _by_name(compute(df, ROUGH))
     assert {k: v.individual_score for k, v in a.items()} == \
         {k: v.individual_score for k, v in b.items()}
@@ -184,10 +184,11 @@ def vault(tmp_path, monkeypatch):
 def test_grading_rules_are_stored_per_evaluation(vault):
     import dataclasses
     a, b = survey.slugify("MGT 301", "1"), survey.slugify("MGT 301", "2")
-    survey.save_grading(vault, a, dataclasses.asdict(ROUGH),
+    QUALITY = GradeSettings(response_scoring="quality")
+    survey.save_grading(vault, a, dataclasses.asdict(QUALITY),
                         {"ann": {"adjust": -10, "points": None}})
     got_a, got_b = survey.load_grading(vault, a), survey.load_grading(vault, b)
-    assert settings_from(got_a["settings"]).response_scoring == "rough"
+    assert settings_from(got_a["settings"]).response_scoring == "quality"
     assert got_a["overrides"] == {"ann": {"adjust": -10}}
     assert got_b == {"settings": {}, "overrides": {}}
     assert settings_from(got_b["settings"]) == GradeSettings()
@@ -205,11 +206,11 @@ def test_a_new_round_takes_the_rules_but_not_the_overrides(vault):
              "Team": "1"} for f in ("Ann", "Bob", "Cid")]
     s1, _ = survey.save_setup("MGT 301", "1", pd.DataFrame(rows),
                               dict(survey.DEFAULT_SURVEY), vault=vault)
-    survey.save_grading(vault, s1, dataclasses.asdict(ROUGH),
-                        {"ann lee": {"adjust": -10}})
+    survey.save_grading(vault, s1, dataclasses.asdict(
+        GradeSettings(response_scoring="quality")), {"ann lee": {"adjust": -10}})
     s2, _ = survey.start_round_from(vault, s1, "MGT 301", "2")
     got = survey.load_grading(vault, s2)
-    assert settings_from(got["settings"]).response_scoring == "rough"
+    assert settings_from(got["settings"]).response_scoring == "quality"
     assert got["overrides"] == {}
 
 

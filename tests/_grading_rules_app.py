@@ -95,22 +95,29 @@ def main(workdir: str) -> int:
     st_ = app.session_state["settings"]
     check("a fresh evaluation starts on the new defaults",
           (st_.sensitivity_B, st_.max_multiplier, st_.rounding_step,
-           st_.rounding_mode) == (1.0, 1.0, 5, "down"), repr(st_)[:200])
-
-    # ---- change a rule in Eval 1: rough scoring --------------------------
-    radio = next(r for r in app.radio
-                 if "score the feedback" in str(r.label))
-    radio.set_value("rough").run()
-    check("the change applies", app.session_state["settings"].response_scoring
-          == "rough")
-    stored = survey.load_grading(vault, s1)
-    check("and is saved for Eval 1",
-          settings_from(stored["settings"]).response_scoring == "rough",
-          str(stored)[:200])
-    check("but not for Eval 2", survey.load_grading(vault, s2)["settings"] == {})
+           st_.rounding_mode, st_.response_scoring)
+          == (1.0, 1.0, 5, "nearest", "rough"), repr(st_)[:200])
     teams = app.session_state["teams"]
     pts = sorted({m.response_points for t in teams for m in t.members})
-    check("rough tiers reach the results", set(pts) == {5, 7, 10}, str(pts))
+    check("rough tiers reach the results by default", set(pts) == {5, 7, 10},
+          str(pts))
+
+    # ---- change a rule in Eval 1: quality scoring ------------------------
+    radio = next(r for r in app.radio
+                 if "score the feedback" in str(r.label))
+    radio.set_value("quality").run()
+    check("the change applies", app.session_state["settings"].response_scoring
+          == "quality")
+    stored = survey.load_grading(vault, s1)
+    check("and is saved for Eval 1",
+          settings_from(stored["settings"]).response_scoring == "quality",
+          str(stored)[:200])
+    check("but not for Eval 2",
+          survey.load_grading(vault, s2).get("settings") in ({}, None))
+    teams = app.session_state["teams"]
+    pts = sorted({m.response_points for t in teams for m in t.members})
+    check("quality points are no longer the tiers", set(pts) != {5, 7, 10},
+          str(pts))
 
     # ---- open Eval 2: its own (default) rules ----------------------------
     # As if Eval 2 were picked and its responses loaded (setting the active
@@ -123,7 +130,7 @@ def main(workdir: str) -> int:
     check("Eval 2 renders", not app.exception,
           str([str(e.value)[:200] for e in app.exception]))
     check("Eval 2 has its own rules, not Eval 1's",
-          app.session_state["settings"].response_scoring == "quality",
+          app.session_state["settings"].response_scoring == "rough",
           f"{app.session_state['settings'].response_scoring} loaded_for="
           f"{app.session_state['_grading_loaded_for']} active="
           f"{app.session_state['_active_slug']} stored2={survey.load_grading(vault, s2)}")
@@ -135,7 +142,7 @@ def main(workdir: str) -> int:
         app.session_state[k] = v
     app.run()
     check("Eval 1's rules come back with it",
-          app.session_state["settings"].response_scoring == "rough")
+          app.session_state["settings"].response_scoring == "quality")
 
     # ---- override one student's adjustment and points --------------------
     pick = next(s for s in app.selectbox if s.key == "report_pick")
