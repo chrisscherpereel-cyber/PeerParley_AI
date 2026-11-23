@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.21.2 — cloud storage: every page of files, and a sign-in that renews
+
+Reported from elsewhere: *"a recent upload to PeerParley through the GitHub
+website replaced its storage code with an older copy. That undid last week's
+fixes: Microsoft 365 only sees the first ~200 files again, its sign-in expires
+after about an hour, and Dropbox only reads the first page of files."*
+
+This copy of the code had all three problems, so any upload of it would
+undo those fixes again. Fixed here, with tests that fail on the old code:
+
+- **Microsoft 365 lists every page.** Graph returns a folder's files 200 at a
+  time and says where the next page is; only the first page was read, so past
+  ~200 objects submissions and whole surveys silently disappeared. The listing
+  now follows every page (and asks for names only, up to 999 a page).
+- **The Microsoft 365 sign-in renews itself.** The access token lasts about an
+  hour and was kept for the life of the storage connection, which is shared
+  by every session until the server restarts — so after an hour every read
+  and write failed. It is now renewed five minutes before it expires, and a
+  rejected token is renewed and the request retried once.
+- **Dropbox lists every page** (`has_more` / `files_list_folder_continue`).
+- Also: a Dropbox listing error (a network blip) used to read as "this folder
+  is empty", which the app then remembered — every survey vanished from the
+  menu. Only a folder that does not exist yet is empty now; other errors are
+  reported. A Microsoft 365 delete that fails is now reported instead of
+  ignored, so removing a student falls back to blanking their file as
+  intended.
+
+7 new tests (489 total), all against fake provider APIs — no network.
+
 ## 2.21.1 — responses load themselves; rough scoring and nearest rounding by default
 
 Asked: *"Change the default to rough scoring and round to nearest. I should not

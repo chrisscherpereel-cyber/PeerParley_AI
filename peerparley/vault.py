@@ -80,23 +80,59 @@ class M365Backend:
         self.drive = opts.get("drive", "onedrive")
         self.site_id = opts.get("site_id", "")
         self._token = None
+        self._token_expires = 0.0
+        self._msal_app = None
 
-    def _get_token(self) -> str:
-        if self._token:
+    # A Microsoft access token lasts about an hour. It used to be fetched once
+    # and kept for the life of the backend — which, cached for the session,
+    # outlives it — so after an hour every read and write failed with 401
+    # until the app was restarted. It is now renewed five minutes before it
+    # runs out, and a 401 anyway (revoked, clock skew) renews it and retries
+    # the request once.
+    TOKEN_MARGIN = 300.0
+
+    def _get_token(self, force: bool = False) -> str:
+        import time
+        if self._token and not force and time.time() < self._token_expires - self.TOKEN_MARGIN:
             return self._token
         import msal
-        app = msal.ConfidentialClientApplication(
-            self.client_id,
-            authority=f"https://login.microsoftonline.com/{self.tenant_id}",
-            client_credential=self.client_secret,
-        )
-        result = app.acquire_token_for_client(
+        if self._msal_app is None:
+            self._msal_app = msal.ConfidentialClientApplication(
+                self.client_id,
+                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+                client_credential=self.client_secret,
+            )
+        if force:
+            # MSAL keeps its own copy of the token; a forced renewal must not
+            # be handed the same rejected one back.
+            self._msal_app = msal.ConfidentialClientApplication(
+                self.client_id,
+                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+                client_credential=self.client_secret,
+            )
+        result = self._msal_app.acquire_token_for_client(
             scopes=["https://graph.microsoft.com/.default"]
         )
         if "access_token" not in result:
             raise RuntimeError(f"M365 auth failed: {result.get('error_description')}")
         self._token = result["access_token"]
+        try:
+            lifetime = float(result.get("expires_in") or 3599)
+        except (TypeError, ValueError):
+            lifetime = 3599.0
+        self._token_expires = time.time() + lifetime
         return self._token
+
+    def _request(self, method: str, url: str, content: bool = False, **kw):
+        """One Graph call, renewing the token and retrying once on a 401."""
+        r = requests.request(method, url, headers=self._headers(content=content),
+                             timeout=60, **kw)
+        if r.status_code == 401:
+            self._get_token(force=True)
+            r = requests.request(method, url,
+                                 headers=self._headers(content=content),
+                                 timeout=60, **kw)
+        return r
 
     def _drive_root(self) -> str:
         if self.drive == "sharepoint":
@@ -117,27 +153,46 @@ class M365Backend:
     def put(self, name: str, data: bytes) -> str:
         # Simple upload (<4 MB). PUT to /root:/path:/content
         url = f"{self._drive_root()}/root:/{self._item_path(name)}:/content"
-        r = requests.put(url, headers=self._headers(content=True), data=data, timeout=60)
+        r = self._request("PUT", url, content=True, data=data)
         r.raise_for_status()
         return r.json().get("id", name)
 
     def get(self, name: str) -> bytes:
         url = f"{self._drive_root()}/root:/{self._item_path(name)}:/content"
-        r = requests.get(url, headers=self._headers(), timeout=60)
+        r = self._request("GET", url)
         r.raise_for_status()
         return r.content
 
+    # Graph returns a folder's children a page at a time (200 by default) and
+    # says where the next page is in "@odata.nextLink". Only the first page
+    # used to be read, so past ~200 objects — one section's submissions plus
+    # a few surveys — submissions, and whole surveys, silently disappeared.
+    MAX_PAGES = 1000
+
     def list(self) -> List[str]:
-        url = f"{self._drive_root()}/root:/{self.folder}:/children"
-        r = requests.get(url, headers=self._headers(), timeout=60)
-        if r.status_code == 404:
-            return []
-        r.raise_for_status()
-        return [c["name"] for c in r.json().get("value", [])]
+        url = (f"{self._drive_root()}/root:/{self.folder}:/children"
+               f"?$select=name&$top=999")
+        names: List[str] = []
+        for _ in range(self.MAX_PAGES):
+            r = self._request("GET", url)
+            if r.status_code == 404:
+                return []
+            r.raise_for_status()
+            body = r.json()
+            names += [c["name"] for c in body.get("value", [])]
+            url = body.get("@odata.nextLink")
+            if not url:
+                return names
+        raise RuntimeError("Microsoft 365 kept returning more pages of files; "
+                           "stopped after %d." % self.MAX_PAGES)
 
     def delete(self, name: str) -> None:
         url = f"{self._drive_root()}/root:/{self._item_path(name)}:"
-        requests.delete(url, headers=self._headers(), timeout=60)
+        r = self._request("DELETE", url)
+        # Gone already is fine; anything else is a failure the caller needs to
+        # hear about (removing a student falls back to blanking the file).
+        if r.status_code not in (200, 204, 404):
+            r.raise_for_status()
 
 
 # --------------------------------------------------------------------------- #
@@ -176,12 +231,34 @@ class DropboxBackend:
         _md, resp = self.dbx.files_download(self._p(name))
         return resp.content
 
+    # Dropbox returns a folder listing a page at a time (`has_more`, then
+    # `files_list_folder_continue` with the cursor). Only the first page used
+    # to be read, so files past it — submissions, surveys — were invisible.
+    # And any error at all used to come back as "the folder is empty", which
+    # the app then remembered: a network blip made every survey vanish. Only
+    # a folder that does not exist yet is empty now; anything else is raised.
+    MAX_PAGES = 1000
+
     def list(self) -> List[str]:
+        import dropbox
         try:
             res = self.dbx.files_list_folder(self.folder)
-            return [e.name for e in res.entries]
-        except Exception:
-            return []
+        except dropbox.exceptions.ApiError as exc:
+            err = getattr(exc, "error", None)
+            if (err is not None and getattr(err, "is_path", lambda: False)()
+                    and err.get_path().is_not_found()):
+                return []
+            raise
+        names = [e.name for e in res.entries]
+        pages = 1
+        while getattr(res, "has_more", False):
+            if pages >= self.MAX_PAGES:
+                raise RuntimeError("Dropbox kept returning more pages of files; "
+                                   "stopped after %d." % self.MAX_PAGES)
+            res = self.dbx.files_list_folder_continue(res.cursor)
+            names += [e.name for e in res.entries]
+            pages += 1
+        return names
 
     def delete(self, name: str) -> None:
         try:
